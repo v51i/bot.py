@@ -33,6 +33,7 @@ class TradingBot:
     self.session = requests.Session()
 
   def send_discord(self, title, description, color):
+    print("-> محاولة إرسال رسالة إلى ديسكورد...", flush=True)
     payload = {
         "embeds": [
             {
@@ -45,28 +46,27 @@ class TradingBot:
         ]
     }
     try:
-      response = self.session.post(self.webhook_url, json=payload)
+      response = self.session.post(self.webhook_url, json=payload, timeout=10)
       print(
-          f"Discord Status: {response.status_code}, Response: {response.text}"
+          f"Discord Status: {response.status_code}, Response: {response.text}",
+          flush=True,
       )
     except Exception as e:
-      logging.error(f"خطأ في الاتصال بديسكورد: {e}")
+      print(f"خطأ خطير في إرسال ديسكورد: {e}", flush=True)
 
   def fetch_btc_price(self):
-    """جلب سعر البيتكوين من منصة Kraken (مستقرة ولا تحظر السحابة)"""
     try:
       url = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD"
       res = self.session.get(url, timeout=10)
       data = res.json()
-      # استخراج السعر بدقة من بيانات كراكن
       price = float(data["result"]["XXBTZUSD"]["c"][0])
       return price
     except Exception as e:
-      logging.error(f"خطأ في جلب بيانات البيتكوين: {e}")
+      print(f"خطأ في جلب بيانات البيتكوين: {e}", flush=True)
       return None
 
   def run(self):
-    logging.info("🤖 تم تشغيل البوت الاحترافي بنجاح!")
+    print("🤖 تم بدء تشغيل دالة البوت بنجاح!", flush=True)
     # إرسال رسالة التشغيل للديسكورد فوراً
     self.send_discord(
         "🟢 بوت التداول الذكي يعمل الآن",
@@ -76,17 +76,14 @@ class TradingBot:
 
     while True:
       try:
-        logging.info("جاري فحص الأسواق...")
+        print("جاري فحص الأسواق...", flush=True)
         btc_price = self.fetch_btc_price()
-
         if btc_price:
-          logging.info(f"سعر البيتكوين الحالي: {btc_price}")
-          # هنا سيتم إضافة شروط الصفقات لاحقاً
-
-        time.sleep(300)  # فحص كل 5 دقائق
+          print(f"سعر البيتكوين الحالي: {btc_price}", flush=True)
+        time.sleep(300)
       except Exception as e:
-        logging.error(f"خطأ في الحلقة الرئيسية: {e}")
-        time.sleep(60)
+          print(f"خطأ في الحلقة الرئيسية: {e}", flush=True)
+          time.sleep(60)
 
 
 if __name__ == "__main__":
