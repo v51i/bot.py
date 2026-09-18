@@ -6,14 +6,13 @@ import time
 from flask import Flask
 import requests
 
-# ==================== الإعدادات (رابط ديسكورد الجديد المحدث) ====================
+# ==================== الإعدادات ====================
 WEBHOOK_URL = "https://discord.com/api/webhooks/1550603254029623306/ySsk09phVUoxa-hUfTcz-FLkUZvw5Btygpw2C5gW7lII8p6jNPoiQoOPrrExaYAY04oF"
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# سيرفر ويب وهمي ليرضي موقع Render
 app = Flask(__name__)
 
 
@@ -27,7 +26,6 @@ def run_web():
   app.run(host="0.0.0.0", port=port)
 
 
-# ==================== كود بوت التداول ====================
 class TradingBot:
 
   def __init__(self, webhook_url):
@@ -54,53 +52,17 @@ class TradingBot:
     except Exception as e:
       logging.error(f"خطأ في الاتصال بديسكورد: {e}")
 
-  def fetch_binance_candles(self, symbol="BTCUSDT", interval="1h", limit=10):
+  def fetch_btc_price(self):
+    """جلب سعر البيتكوين بطريقة آمنة لا يتم حظرها"""
     try:
-      url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+      url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
       res = self.session.get(url, timeout=10)
       data = res.json()
-      return [
-          {
-              "open": float(c[1]),
-              "high": float(c[2]),
-              "low": float(c[3]),
-              "close": float(c[4]),
-          }
-          for c in data
-      ]
+      price = float(data["bitcoin"]["usd"])
+      return price
     except Exception as e:
       logging.error(f"خطأ في جلب بيانات البيتكوين: {e}")
       return None
-
-  def analyze_candlestick_patterns(self, candles):
-    if not candles or len(candles) < 3:
-      return "HOLD", 0
-    curr = candles[-1]
-    prev = candles[-2]
-    curr_body = abs(curr["close"] - curr["open"])
-    curr_range = curr["high"] - curr["low"]
-
-    lower_shadow = curr["low"] - min(curr["open"], curr["close"])
-    if (
-        lower_shadow > curr_body * 2
-        and curr["close"] > curr["open"]
-        and curr_range > 0
-    ):
-      return "BUY", "شمعة مطرقة صاعدة (Hammer)"
-
-    if (
-        curr["close"] > curr["open"]
-        and prev["close"] < prev["open"]
-        and curr["close"] >= prev["open"]
-        and curr["open"] <= prev["close"]
-    ):
-      return "BUY", "شمعة ابتلاع صاعد قوية (Bullish Engulfing)"
-
-    upper_shadow = curr["high"] - max(curr["open"], curr["close"])
-    if upper_shadow > curr_body * 2 and curr["close"] < curr["open"]:
-      return "SELL", "شمعة نجمة هابطة (Shooting Star)"
-
-    return "HOLD", "لا توجد إشارة واضحة"
 
   def run(self):
     logging.info("🤖 تم تشغيل البوت الاحترافي بنجاح!")
@@ -113,34 +75,13 @@ class TradingBot:
     while True:
       try:
         logging.info("جاري فحص الأسواق...")
-        btc_candles = self.fetch_binance_candles("BTCUSDT", "1h", 10)
-        if btc_candles:
-          current_price = btc_candles[-1]["close"]
-          action, reason = self.analyze_candlestick_patterns(btc_candles)
+        btc_price = self.fetch_btc_price()
 
-          if action == "BUY":
-            target = current_price * 1.018
-            stop_loss = current_price * 0.991
-            desc = (
-                f"**القرار:** شراء (BUY) 🚀\n**السعر الحالي:**"
-                f" `{current_price}`\n**النمط المكتشف:**"
-                f" {reason}\n**الهدف:** `{target:.2f}`\n**وقف"
-                f" الخسارة:** `{stop_loss:.2f}`"
-            )
-            self.send_discord("🚨 إشارة بيتكوين (شراء)", desc, 3066993)
+        if btc_price:
+          logging.info(f"سعر البيتكوين الحالي: {btc_price}")
+          # هنا يمكنك إضافة شروط البيع والشراء بناءً على السعر
 
-          elif action == "SELL":
-            target = current_price * 0.982
-            stop_loss = current_price * 1.009
-            desc = (
-                f"**القرار:** بيع (SELL) 🔻\n**السعر الحالي:**"
-                f" `{current_price}`\n**النمط المكتشف:**"
-                f" {reason}\n**الهدف:** `{target:.2f}`\n**وقف"
-                f" الخسارة:** `{stop_loss:.2f}`"
-            )
-            self.send_discord("🚨 إشارة بيتكوين (بيع)", desc, 15158332)
-
-        time.sleep(1800)
+        time.sleep(300)  # فحص كل 5 دقائق
       except Exception as e:
         logging.error(f"خطأ في الحلقة الرئيسية: {e}")
         time.sleep(60)
