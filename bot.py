@@ -6,14 +6,14 @@ import time
 from flask import Flask
 import requests
 
-# ==================== الإعدادات ====================
-WEBHOOK_URL = "https://discord.com/api/webhooks/1550572879316516964/7W0Z5PqzctdFLfGJgSF15rl0yegVdtHjiKe-Nh9iQF0MnMZIse781chMNiTB2LwiBMJc"
+# ==================== الإعدادات (رابط ديسكورد الجديد المحدث) ====================
+WEBHOOK_URL = "https://discord.com/api/webhooks/1550603254029623306/ySsk09phVUoxa-hUfTcz-FLkUZvw5Btygpw2C5gW7lII8p6jNPoiQoOPrrExaYAY04oF"
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# سيرفر ويب وهمي لكي يرضى موقع Render
+# سيرفر ويب وهمي ليرضي موقع Render
 app = Flask(__name__)
 
 
@@ -48,7 +48,6 @@ class TradingBot:
     }
     try:
       response = self.session.post(self.webhook_url, json=payload)
-      # طباعة رد ديسكورد في السجلات لنعرف سبب عدم وصول الرسالة
       print(
           f"Discord Status: {response.status_code}, Response: {response.text}"
       )
@@ -148,10 +147,8 @@ class TradingBot:
 
 
 if __name__ == "__main__":
-  # تشغيل سيرفر الويب في الخلفية
   t = Thread(target=run_web)
   t.start()
 
-  # تشغيل بوت التداول
   bot = TradingBot(WEBHOOK_URL)
   bot.run()
