@@ -53,12 +53,13 @@ class TradingBot:
       logging.error(f"خطأ في الاتصال بديسكورد: {e}")
 
   def fetch_btc_price(self):
-    """جلب سعر البيتكوين بطريقة آمنة لا يتم حظرها"""
+    """جلب سعر البيتكوين من منصة Kraken (مستقرة ولا تحظر السحابة)"""
     try:
-      url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+      url = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD"
       res = self.session.get(url, timeout=10)
       data = res.json()
-      price = float(data["bitcoin"]["usd"])
+      # استخراج السعر بدقة من بيانات كراكن
+      price = float(data["result"]["XXBTZUSD"]["c"][0])
       return price
     except Exception as e:
       logging.error(f"خطأ في جلب بيانات البيتكوين: {e}")
@@ -66,6 +67,7 @@ class TradingBot:
 
   def run(self):
     logging.info("🤖 تم تشغيل البوت الاحترافي بنجاح!")
+    # إرسال رسالة التشغيل للديسكورد فوراً
     self.send_discord(
         "🟢 بوت التداول الذكي يعمل الآن",
         "تم تشغيل النظام بنجاح على السحابة.\nجاري مراقبة البيتكوين والذهب.",
@@ -79,7 +81,7 @@ class TradingBot:
 
         if btc_price:
           logging.info(f"سعر البيتكوين الحالي: {btc_price}")
-          # هنا يمكنك إضافة شروط البيع والشراء بناءً على السعر
+          # هنا سيتم إضافة شروط الصفقات لاحقاً
 
         time.sleep(300)  # فحص كل 5 دقائق
       except Exception as e:
