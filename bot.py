@@ -34,6 +34,16 @@ class TradingBot:
 
   def send_discord(self, title, description, color):
     print("-> محاولة إرسال رسالة إلى ديسكورد...", flush=True)
+
+    # إضافة هوية متصفح لتجاوز حظر Cloudflare وديسكورد
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+            " like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        ),
+    }
+
     payload = {
         "embeds": [
             {
@@ -46,7 +56,9 @@ class TradingBot:
         ]
     }
     try:
-      response = self.session.post(self.webhook_url, json=payload, timeout=10)
+      response = self.session.post(
+          self.webhook_url, json=payload, headers=headers, timeout=10
+      )
       print(
           f"Discord Status: {response.status_code}, Response: {response.text}",
           flush=True,
@@ -67,7 +79,6 @@ class TradingBot:
 
   def run(self):
     print("🤖 تم بدء تشغيل دالة البوت بنجاح!", flush=True)
-    # إرسال رسالة التشغيل للديسكورد فوراً
     self.send_discord(
         "🟢 بوت التداول الذكي يعمل الآن",
         "تم تشغيل النظام بنجاح على السحابة.\nجاري مراقبة البيتكوين والذهب.",
@@ -82,8 +93,8 @@ class TradingBot:
           print(f"سعر البيتكوين الحالي: {btc_price}", flush=True)
         time.sleep(300)
       except Exception as e:
-          print(f"خطأ في الحلقة الرئيسية: {e}", flush=True)
-          time.sleep(60)
+        print(f"خطأ في الحلقة الرئيسية: {e}", flush=True)
+        time.sleep(60)
 
 
 if __name__ == "__main__":
