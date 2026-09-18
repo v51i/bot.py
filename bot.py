@@ -6,7 +6,6 @@ import requests
 # ==================== الإعدادات المتقدمة ====================
 WEBHOOK_URL = "https://discord.com/api/webhooks/1550572879316516964/7W0Z5PqzctdFLfGJgSF15rl0yegVdtHjiKe-Nh9iQF0MnMZIse781chMNiTB2LwiBMJc"
 
-# إعداد نظام تتبع الأخطاء (Logging)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -20,7 +19,6 @@ class TradingBot:
         self.session = requests.Session()
 
     def send_discord(self, title, description, color):
-        """إرسال إشعار منسق إلى ديسكورد"""
         payload = {
             "embeds": [
                 {
@@ -33,14 +31,11 @@ class TradingBot:
             ]
         }
         try:
-            response = self.session.post(self.webhook_url, json=payload)
-            if response.status_code != 204:
-                logging.error(f"فشل الإرسال لديسكورد: {response.status_code}")
+            self.session.post(self.webhook_url, json=payload)
         except Exception as e:
             logging.error(f"خطأ في الاتصال بديسكورد: {e}")
 
     def fetch_binance_candles(self, symbol="BTCUSDT", interval="1h", limit=10):
-        """جلب الشموع اليابانية من منصة بينانس"""
         try:
             url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
             res = self.session.get(url, timeout=10)
@@ -63,7 +58,6 @@ class TradingBot:
             return None
 
     def fetch_gold_price(self):
-        """جلب سعر الذهب العالمي"""
         try:
             url = "https://api.gold-api.com/price/XAU"
             res = self.session.get(url, timeout=10)
@@ -73,7 +67,6 @@ class TradingBot:
             return None
 
     def analyze_candlestick_patterns(self, candles):
-        """تحليل 5 أنماط للشموع اليابانية لتجنب الانعكاسات الخاطئة"""
         if not candles or len(candles) < 3:
             return "HOLD", 0
 
@@ -81,10 +74,8 @@ class TradingBot:
         prev = candles[-2]
 
         curr_body = abs(curr["close"] - curr["open"])
-        prev_body = abs(prev["close"] - prev["open"])
         curr_range = curr["high"] - curr["low"]
 
-        # 1. شمعة المطرقة الصاعدة (Hammer) -> شراء
         lower_shadow = curr["low"] - min(curr["open"], curr["close"])
         if (
             lower_shadow > curr_body * 2
@@ -93,7 +84,6 @@ class TradingBot:
         ):
             return "BUY", "شمعة مطرقة صاعدة (Hammer)"
 
-        # 2. شمعة الابتلاع الصاعد (Bullish Engulfing) -> شراء قوي
         if (
             curr["close"] > curr["open"]
             and prev["close"] < prev["open"]
@@ -102,12 +92,10 @@ class TradingBot:
         ):
             return "BUY", "شمعة ابتلاع صاعد قوية (Bullish Engulfing)"
 
-        # 3. شمعة النجمة الهابطة (Shooting Star) -> بيع
         upper_shadow = curr["high"] - max(curr["open"], curr["close"])
         if upper_shadow > curr_body * 2 and curr["close"] < curr["open"]:
             return "SELL", "شمعة نجمة هابطة (Shooting Star)"
 
-        # 4. شمعة الابتلاع الهابط (Bearish Engulfing) -> بيع قوي
         if (
             curr["close"] < curr["open"]
             and prev["close"] > prev["open"]
@@ -116,7 +104,7 @@ class TradingBot:
         ):
             return "SELL", "شمعة ابتلاع هابط قوية (Bearish Engulfing)"
 
-        return "HOLD", "لا توجد إشارة واضحة (انتظار)"
+        return "HOLD", "لا توجد إشارة واضحة"
 
     def run(self):
         logging.info("🤖 تم تشغيل البوت الاحترافي بنجاح!")
@@ -133,7 +121,6 @@ class TradingBot:
             try:
                 logging.info("جاري فحص الأسواق...")
 
-                # --- تحليل البيتكوين ---
                 btc_candles = self.fetch_binance_candles("BTCUSDT", "1h", 10)
                 if btc_candles:
                     current_price = btc_candles[-1]["close"]
@@ -142,8 +129,8 @@ class TradingBot:
                     )
 
                     if action == "BUY":
-                        target = current_price * 1.018  # هدف 1.8%
-                        stop_loss = current_price * 0.991  # وقف خسارة 0.9%
+                        target = current_price * 1.018
+                        stop_loss = current_price * 0.991
                         desc = (
                             f"**القرار:** شراء (BUY) 🚀\n**السعر الحالي:**"
                             f" `{current_price}`\n**النمط المكتشف:**"
@@ -169,17 +156,14 @@ class TradingBot:
                             "🚨 إشارة تداول بيتكوين (بيع)", desc, 15158332
                         )
 
-                # --- تحليل الذهب ---
                 gold_price = self.fetch_gold_price()
                 if gold_price:
                     logging.info(f"سعر الذهب الحالي: {gold_price}")
-                    # يمكنك إضافة شروط الذهب هنا بنفس طريقة البيتكوين
 
-                # الانتظار لمدة 30 دقيقة للفحص القادم
                 time.sleep(1800)
 
             except Exception as e:
-                logging.error(fحيث حدث خطأ في الحلقة الرئيسية: {e})
+                logging.error(f"حدث خطأ في الحلقة الرئيسية: {e}")
                 time.sleep(60)
 
 
