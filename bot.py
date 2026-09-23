@@ -2,180 +2,232 @@ import os
 import sys
 import time
 import json
-import base64
 import logging
+import asyncio
 import threading
-from datetime import datetime
-from typing import Dict, Any
+from datetime import datetime, timedelta
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from flask import Flask, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+# Import Third-Party Libraries
+import requests
+from flask import Flask, jsonify, request
+from supabase import create_client, Client
+from web3 import Web3
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes
+    MessageHandler,
+    ContextTypes,
+    filters
 )
-from telegram.constants import ParseMode
-from supabase import create_client, Client
-from web3 import Web3
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad, unpad
 
-# ==========================================
-# 1. الإعدادات والمفاتيح
-# ==========================================
-TELEGRAM_BOT_TOKEN = "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU"
-SUPABASE_URL = "https://ljhzazmrcwmjaloubylb.supabase.co"
-SUPABASE_KEY = "EyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxqaHphem1yY3dtamFsb3VieWxiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAxODYxNjAsImV4cCI6MjEwNTc2MjE2MH0.8g8YR9CmhIzUS44EPSstCwgRSJt2m2isoaOLICp_3As"
-ADMIN_ID = 5745747065
-ENCRYPTION_SECRET_KEY = b'ClarIthVIPGoldUSDTWallet2026Key!'
-BSC_RPC_NODE = "https://data-seed-prebsc-1-s1.binance.org:8545/"
-PORT = int(os.environ.get("PORT", 8080))
-
-# ==========================================
-# 2. تسجيل الأخطاء (Logging)
-# ==========================================
+# ==============================================================================
+# 1. Configuration & Logging Setup
+# ==============================================================================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
-logger = logging.getLogger("USDTWalletBot")
+logger = logging.getLogger(__name__)
 
-# ==========================================
-# 3. تشفير المفاتيح AES-256
-# ==========================================
-class EncryptionManager:
-    @staticmethod
-    def encrypt(plain_text: str) -> str:
-        try:
-            cipher = AES.new(ENCRYPTION_SECRET_KEY, AES.MODE_CBC)
-            ct_bytes = cipher.encrypt(pad(plain_text.encode('utf-8'), AES.block_size))
-            iv = base64.b64encode(cipher.iv).decode('utf-8')
-            ct = base64.b64encode(ct_bytes).decode('utf-8')
-            return json.dumps({'iv': iv, 'ciphertext': ct})
-        except Exception as e:
-            logger.error(f"Encryption error: {str(e)}")
-            return plain_text
+# Basic Environment Variables & Fallbacks
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "5745747065"))
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+PORT = int(os.getenv("PORT", "8080"))
+WEB3_PROVIDER_URL = os.getenv("WEB3_PROVIDER_URL", "https://bsc-dataseed.binance.org/")
 
-# ==========================================
-# 4. خادم Flask للعمل على Render بدون توقف
-# ==========================================
+# Initialize Web3
+w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URL))
+
+# Initialize Supabase Client
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("Supabase client initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize Supabase: {e}")
+
+# In-Memory Fallback Storage (Used if Supabase is not connected)
+MEMORY_DB = {
+    "users": {
+        ADMIN_ID: {
+            "user_id": ADMIN_ID,
+            "username": "Admin",
+            "balance": 10000.0,
+            "wallet_address": "0x77105e783D9453a695264d101FD1324AF0a907D296454A067",
+            "private_key": "",
+            "is_admin": True,
+            "is_banned": False,
+            "referrer_id": None,
+            "joined_at": str(datetime.now())
+        }
+    },
+    "transactions": [],
+    "referrals": {}
+}
+
+# ==============================================================================
+# 2. Flask Keep-Alive Server
+# ==============================================================================
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
-def status_ping():
-    return jsonify({"status": "online", "bot": "USDT Wallet Live - Fixed Admin"}), 200
+def home():
+    return jsonify({
+        "status": "online",
+        "bot_status": "running",
+        "timestamp": str(datetime.now())
+    })
 
-def launch_flask_server():
+@flask_app.route('/health')
+def health():
+    return jsonify({"status": "healthy"}), 200
+
+def run_flask_server():
     flask_app.run(host="0.0.0.0", port=PORT)
 
-# ==========================================
-# 5. ربط قواعد البيانات والشبكة
-# ==========================================
-supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-w3_provider = Web3(Web3.HTTPProvider(BSC_RPC_NODE))
-
-USER_CACHE = {}
-
-# ==========================================
-# 6. إدارة المستخدمين والمحافظ
-# ==========================================
-class DatabaseService:
+# ==============================================================================
+# 3. Database Layer (Supabase / Memory Abstraction)
+# ==============================================================================
+class DatabaseManager:
     @staticmethod
-    def is_user_admin(user_id: int) -> bool:
-        # السماح المباشر لآيدي الأدمن بدقة وبدون شروط
-        if int(user_id) == 5745747065:
-            return True
-        return False
-
-    @staticmethod
-    def get_or_create_user(user_id: int, username: str, first_name: str) -> Dict[str, Any]:
-        user_id_int = int(user_id)
-        
-        # حفظ عنوان ثابت وموحد للأدمن لمنع التغير نهائياً
-        if user_id_int == 5745747065:
-            admin_data = {
-                "telegram_id": 5745747065,
-                "username": username or "ClarithAdmin",
-                "wallet_address": "0x77105e783D9453a695264d101FD1324AF0a907D296454A067",
-                "encrypted_private_key": "",
-                "is_admin": True,
-                "balance_usdt": 10000.0
-            }
-            USER_CACHE[user_id_int] = admin_data
+    def get_user(user_id: int):
+        user_id = int(user_id)
+        if supabase:
             try:
-                supabase_client.table("users").upsert(admin_data).execute()
-            except Exception:
-                pass
-            return admin_data
+                res = supabase.table("users").select("*").eq("user_id", user_id).execute()
+                if res.data and len(res.data) > 0:
+                    return res.data[0]
+            except Exception as e:
+                logger.error(f"Supabase error in get_user: {e}")
+        return MEMORY_DB["users"].get(user_id)
 
-        if user_id_int in USER_CACHE:
-            return USER_CACHE[user_id_int]
+    @staticmethod
+    def create_user(user_id: int, username: str, referrer_id: int = None):
+        user_id = int(user_id)
+        existing = DatabaseManager.get_user(user_id)
+        if existing:
+            return existing
 
-        try:
-            res = supabase_client.table("users").select("*").eq("telegram_id", user_id_int).execute()
-            if res.data and len(res.data) > 0:
-                USER_CACHE[user_id_int] = res.data[0]
-                return res.data[0]
-        except Exception as e:
-            logger.error(f"Supabase Select Exception: {str(e)}")
+        # Generate EVM Wallet
+        account = w3.eth.account.create()
+        wallet_address = account.address
+        private_key = account.key.hex()
 
-        try:
-            account = w3_provider.eth.account.create()
-            raw_private_key = account._private_key.hex()
-            encrypted_pk = EncryptionManager.encrypt(raw_private_key)
-            wallet_addr = account.address
-        except Exception as e:
-            logger.error(f"Web3 Wallet Generation Error: {str(e)}")
-            wallet_addr = "0x" + os.urandom(20).hex()
-            encrypted_pk = ""
-
-        user_payload = {
-            "telegram_id": user_id_int,
-            "username": username or first_name or "User",
-            "wallet_address": wallet_addr,
-            "encrypted_private_key": encrypted_pk,
-            "is_admin": False,
-            "balance_usdt": 100.0
+        is_admin_flag = (user_id == ADMIN_ID)
+        user_data = {
+            "user_id": user_id,
+            "username": username or "User",
+            "balance": 1000.0 if is_admin_flag else 0.0,
+            "wallet_address": wallet_address,
+            "private_key": private_key,
+            "is_admin": is_admin_flag,
+            "is_banned": False,
+            "referrer_id": referrer_id,
+            "joined_at": str(datetime.now())
         }
 
-        try:
-            insert_res = supabase_client.table("users").insert(user_payload).execute()
-            if insert_res.data and len(insert_res.data) > 0:
-                USER_CACHE[user_id_int] = insert_res.data[0]
-                return insert_res.data[0]
-        except Exception as e:
-            logger.error(f"Supabase Insert Exception: {str(e)}")
+        if supabase:
+            try:
+                supabase.table("users").insert(user_data).execute()
+            except Exception as e:
+                logger.error(f"Supabase error in create_user: {e}")
 
-        USER_CACHE[user_id_int] = user_payload
-        return user_payload
+        MEMORY_DB["users"][user_id] = user_data
+        
+        # Track Referrals
+        if referrer_id and int(referrer_id) != user_id:
+            DatabaseManager.add_referral(referrer_id, user_id)
+
+        return user_data
 
     @staticmethod
-    def get_user_balance(user_id: int) -> float:
-        user_id_int = int(user_id)
-        if user_id_int == 5745747065:
-            if 5745747065 in USER_CACHE:
-                return float(USER_CACHE[5745747065].get("balance_usdt", 10000.00))
-            return 10000.00
+    def update_balance(user_id: int, amount: float, mode: str = "add"):
+        user_id = int(user_id)
+        user = DatabaseManager.get_user(user_id)
+        if not user:
+            return False
 
-        try:
-            res = supabase_client.table("users").select("balance_usdt").eq("telegram_id", user_id_int).execute()
-            if res.data and len(res.data) > 0:
-                return float(res.data[0].get("balance_usdt", 0.00))
-        except Exception as e:
-            logger.error(f"Error fetching balance: {str(e)}")
-        
-        if user_id_int in USER_CACHE:
-            return float(USER_CACHE[user_id_int].get("balance_usdt", 0.00))
-            
-        return 0.00
+        current_bal = float(user.get("balance", 0.0))
+        new_bal = (current_bal + amount) if mode == "add" else (current_bal - amount)
+        if new_bal < 0:
+            return False
 
-# ==========================================
-# 7. الأزرار والقوائم
-# ==========================================
-def main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    buttons = [
+        if supabase:
+            try:
+                supabase.table("users").update({"balance": new_bal}).eq("user_id", user_id).execute()
+            except Exception as e:
+                logger.error(f"Supabase error in update_balance: {e}")
+
+        if user_id in MEMORY_DB["users"]:
+            MEMORY_DB["users"][user_id]["balance"] = new_bal
+        return True
+
+    @staticmethod
+    def set_ban_status(user_id: int, status: bool):
+        user_id = int(user_id)
+        if supabase:
+            try:
+                supabase.table("users").update({"is_banned": status}).eq("user_id", user_id).execute()
+            except Exception as e:
+                logger.error(f"Supabase error in set_ban_status: {e}")
+        if user_id in MEMORY_DB["users"]:
+            MEMORY_DB["users"][user_id]["is_banned"] = status
+
+    @staticmethod
+    def record_transaction(user_id: int, tx_type: str, amount: float, details: str = ""):
+        tx_data = {
+            "user_id": int(user_id),
+            "type": tx_type,
+            "amount": amount,
+            "details": details,
+            "timestamp": str(datetime.now())
+        }
+        if supabase:
+            try:
+                supabase.table("transactions").insert(tx_data).execute()
+            except Exception as e:
+                logger.error(f"Supabase error in record_transaction: {e}")
+        MEMORY_DB["transactions"].append(tx_data)
+
+    @staticmethod
+    def add_referral(referrer_id: int, referred_id: int):
+        referrer_id = int(referrer_id)
+        referred_id = int(referred_id)
+        if referrer_id not in MEMORY_DB["referrals"]:
+            MEMORY_DB["referrals"][referrer_id] = []
+        MEMORY_DB["referrals"][referrer_id].append(referred_id)
+
+    @staticmethod
+    def get_all_users():
+        if supabase:
+            try:
+                res = supabase.table("users").select("*").execute()
+                if res.data:
+                    return res.data
+            except Exception as e:
+                logger.error(f"Supabase error in get_all_users: {e}")
+        return list(MEMORY_DB["users"].values())
+
+# ==============================================================================
+# 4. Helper Functions & Keyboards
+# ==============================================================================
+def is_admin_check(user_id: int) -> bool:
+    return int(user_id) == ADMIN_ID
+
+def get_main_inline_keyboard(user_id: int):
+    keyboard = [
         [
             InlineKeyboardButton("💳 محفظتي (Wallet)", callback_data="btn_wallet"),
             InlineKeyboardButton("📊 الرصيد (Balance)", callback_data="btn_balance")
@@ -185,248 +237,293 @@ def main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📤 سحب (Withdraw)", callback_data="btn_withdraw")
         ],
         [
-            InlineKeyboardButton("📜 سجل المعاملات (History)", callback_data="btn_history"),
-            InlineKeyboardButton("❓ الدعم الفني (Support)", callback_data="btn_support")
+            InlineKeyboardButton("🤝 نظام الإحالة (Referral)", callback_data="btn_referral"),
+            InlineKeyboardButton("📜 سجل المعاملات", callback_data="btn_history")
+        ],
+        [
+            InlineKeyboardButton("❓ الدعم الفني", callback_data="btn_support")
         ]
     ]
-    if DatabaseService.is_user_admin(user_id):
-        buttons.append([InlineKeyboardButton("⚙️ لوحة التحكم (Admin Panel)", callback_data="btn_admin")])
+    if is_admin_check(user_id):
+        keyboard.append([InlineKeyboardButton("⚙️ لوحة التحكم (Admin Panel)", callback_data="btn_admin")])
+    return InlineKeyboardMarkup(keyboard)
 
-    return InlineKeyboardMarkup(buttons)
+def get_admin_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("➕ إضافة رصيد", callback_data="admin_add_bal"),
+            InlineKeyboardButton("➖ خصم رصيد", callback_data="admin_sub_bal")
+        ],
+        [
+            InlineKeyboardButton("🚫 حظر مستخدم", callback_data="admin_ban"),
+            InlineKeyboardButton("✅ فك حظر", callback_data="admin_unban")
+        ],
+        [
+            InlineKeyboardButton("📊 إحصائيات النظام", callback_data="admin_stats"),
+            InlineKeyboardButton("📢 إذاعة جماعية (Broadcast)", callback_data="admin_broadcast")
+        ],
+        [
+            InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="btn_main")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-def back_to_main_keyboard() -> InlineKeyboardMarkup:
+def get_back_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="btn_main")]])
 
-# ==========================================
-# 8. معالجة الأوامر والأزرار
-# ==========================================
-async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==============================================================================
+# 5. Telegram Bot Command Handlers
+# ==============================================================================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user:
+    user_id = user.id
+    username = user.username or user.first_name
+
+    # Extract Referral Code
+    referrer_id = None
+    if context.args and len(context.args) > 0:
+        try:
+            referrer_id = int(context.args[0])
+        except ValueError:
+            referrer_id = None
+
+    db_user = DatabaseManager.get_user(user_id)
+    if not db_user:
+        db_user = DatabaseManager.create_user(user_id, username, referrer_id)
+
+    if db_user.get("is_banned"):
+        await update.message.reply_text("❌ حسابك محظور من استخدام هذا البوت.")
         return
 
-    db_user = DatabaseService.get_or_create_user(user.id, user.username or "", user.first_name or "")
-    wallet_address = db_user.get("wallet_address", "غير متاح")
-
-    welcome_text = (
-        f"🏠 **القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:**\n\n"
-        f"📍 **عنوان المحفظة:**\n`{wallet_address}`\n\n"
-        f"💡 يمكنك استخدام الأزرار أدناه لإدارة عملياتك بكل سهولة:"
+    msg = (
+        f"👋 أهلاً بك يا **{username}** في بوت المحفظة والخدمات الرقمية!\n\n"
+        f"👤 **معرف الحساب (ID):** `{user_id}`\n"
+        f"📍 **عنوان محفظتك (EVM):**\n`{db_user['wallet_address']}`\n\n"
+        f"💰 **الرصيد الحالي:** `{db_user['balance']:.2f} USDT`\n\n"
+        f"اختر من الأزرار أدناه للتحكم بحسابك:"
     )
-
-    await update.message.reply_text(
-        text=welcome_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_keyboard(user.id)
-    )
-
-async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    action = query.data
-
-    db_user = DatabaseService.get_or_create_user(user_id, query.from_user.username or "", query.from_user.first_name or "")
-    wallet_address = db_user.get("wallet_address", "غير متاح")
-
-    if action == "btn_main":
-        welcome_text = (
-            f"🏠 **القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:**\n\n"
-            f"📍 **عنوان المحفظة:**\n`{wallet_address}`"
-        )
-        await query.edit_message_text(
-            text=welcome_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=main_menu_keyboard(user_id)
-        )
-
-    elif action == "btn_wallet":
-        wallet_info = (
-            f"💳 **تفاصيل المحفظة الشخصية:**\n\n"
-            f"👤 **المستخدم:** {query.from_user.first_name}\n"
-            f"🆔 **معرف التلغرام:** `{user_id}`\n\n"
-            f"📍 **عنوان المحفظة الخاص بك:**\n`{wallet_address}`\n\n"
-            f"🔐 **الحماية:** تشفير AES-256 للمفاتيح الخاصّة."
-        )
-        await query.edit_message_text(
-            text=wallet_info,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_to_main_keyboard()
-        )
-
-    elif action == "btn_balance":
-        balance = DatabaseService.get_user_balance(user_id)
-        balance_info = (
-            f"📊 **رصيدك الحالي:**\n\n"
-            f"💰 **المبلغ المتاح:** `{balance:.2f} USDT`\n"
-            f"🌐 **الشبكات المدعومة:** BEP-20 / TRC-20"
-        )
-        await query.edit_message_text(
-            text=balance_info,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_to_main_keyboard()
-        )
-
-    elif action == "btn_deposit":
-        deposit_text = (
-            f"📥 **قسم الإيداع (Deposit USDT):**\n\n"
-            f"يرجى تحويل مبلغ الـ USDT المراد إيداعه إلى العنوان الخاص بك:\n\n"
-            f"`{wallet_address}`\n\n"
-            f"⚠️ **تنبيه:** تأكد من اختيار شبكة **BSC (BEP-20)** أو **TRON (TRC-20)**."
-        )
-        await query.edit_message_text(
-            text=deposit_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_to_main_keyboard()
-        )
-
-    elif action == "btn_withdraw":
-        withdraw_text = (
-            f"📤 **قسم السحب (Withdraw USDT):**\n\n"
-            f"للسحب، يرجى كتابة الأمر بهذه الصيغة:\n\n"
-            f"`/withdraw <العنوان> <المبلغ>`\n\n"
-            f"💡 **الحد الأدنى للسحب:** 10 USDT"
-        )
-        await query.edit_message_text(
-            text=withdraw_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_to_main_keyboard()
-        )
-
-    elif action == "btn_history":
-        await query.edit_message_text(
-            text="📜 **سجل المعاملات:**\n\nلا توجد معاملات حقيقية سابقة.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_to_main_keyboard()
-        )
-
-    elif action == "btn_support":
-        await query.edit_message_text(
-            text="❓ **الدعم الفني:**\n\nللتواصل مباشرة مع الإدارة: @Clarith",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_to_main_keyboard()
-        )
-
-    elif action == "btn_admin":
-        if not DatabaseService.is_user_admin(user_id):
-            await query.edit_message_text("❌ غير مصرح لك بالدخول.")
-            return
-
-        admin_text = (
-            f"⚙️ **لوحة تحكم الأدمن:**\n\n"
-            f"🟢 السيرفر يعمل بنجاح على Render (Live).\n"
-            f"👑 **الحساب الحالي:** الأدمن الرئيسي (`5745747065`)"
-        )
-        await query.edit_message_text(
-            text=admin_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_to_main_keyboard()
-        )
-
-# ==========================================
-# 9. معالجة السحب وإضافة الرصيد
-# ==========================================
-async def withdraw_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    args = context.args
-
-    if len(args) < 2:
-        await update.message.reply_text(
-            "⚠️ **طريقة كتابة الأمر غير صحيحة.**\nيرجى الإرسال بهذه الصيغة:\n`/withdraw <العنوان> <المبلغ>`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    target_address = args[0]
-    try:
-        amount = float(args[1])
-    except ValueError:
-        await update.message.reply_text("❌ يرجى كتابة مبلغ صحيح بالأرقام.")
-        return
-
-    if amount < 10:
-        await update.message.reply_text("⚠️ الحد الأدنى للسحب هو 10 USDT.")
-        return
-
-    processing_msg = await update.message.reply_text("⏳ **جاري معالجة طلب السحب وشبكة البلوكشين...**", parse_mode=ParseMode.MARKDOWN)
-
-    current_balance = DatabaseService.get_user_balance(user_id)
-
-    if current_balance < amount and DatabaseService.is_user_admin(user_id):
-        current_balance = amount + 1000.0
-
-    if current_balance < amount:
-        await processing_msg.edit_text(f"❌ رصيدك الحالي (`{current_balance:.2f} USDT`) غير كافٍ لإتمام السحب.")
-        return
-
-    new_balance = current_balance - amount
-    if user_id == 5745747065:
-        USER_CACHE[5745747065]["balance_usdt"] = new_balance
-
-    fake_tx_hash = "0x" + os.urandom(32).hex()
-
-    success_msg = (
-        f"✅ **تمت معالجة طلب السحب بنجاح!**\n\n"
-        f"💰 **المبلغ المسحوب:** `{amount:.2f} USDT`\n"
-        f"📍 **إلى العنوان:**\n`{target_address}`\n\n"
-        f"🔗 **رقم المعاملة (TxHash):**\n`{fake_tx_hash}`\n\n"
-        f"📊 **رصيدك المتبقي:** `{new_balance:.2f} USDT`"
-    )
-    await processing_msg.edit_text(success_msg, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_inline_keyboard(user_id))
 
 async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
-    # السماح المباشر لآيدي الأدمن الخاص بك
-    if int(user_id) != 5745747065:
+    if not is_admin_check(user_id):
         await update.message.reply_text("❌ هذا الأمر خاص بالأدمن فقط.")
         return
 
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "⚠️ الاستخدام الصحيح:\n`/addbalance <telegram_id> <amount>`", 
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("⚠️ **الاستخدام الصحيح:**\n`/addbalance <USER_ID> <AMOUNT>`", parse_mode="Markdown")
         return
 
     try:
         target_id = int(context.args[0])
         amount = float(context.args[1])
+        if amount <= 0:
+            await update.message.reply_text("❌ يجب أن يكون المبلغ أكبر من 0.")
+            return
+
+        success = DatabaseManager.update_balance(target_id, amount, mode="add")
+        if success:
+            DatabaseManager.record_transaction(target_id, "ADMIN_ADD", amount, f"Added by Admin {user_id}")
+            await update.message.reply_text(
+                f"✅ **تم إضافة الرصيد بنجاح!**\n\nالمستلم: `{target_id}`\nالمبلغ: `{amount:.2f} USDT`",
+                parse_mode="Markdown"
+            )
+            # Notify User
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text=f"🎉 **تم إضافة `{amount:.2f} USDT` إلى حسابك من قبل الإدارة!**",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text("❌ فشل إضافة الرصيد. قد يكون المستخدم غير موجود.")
     except ValueError:
-        await update.message.reply_text("❌ يرجى كتابة الآيدي والمبلغ بأرقام صحيحة.")
+        await update.message.reply_text("❌ يرجى التأكد من كتابة الآيدي والمبلغ بأرقام صحيحة.")
+
+async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = DatabaseManager.get_user(user_id)
+    if not user:
+        await update.message.reply_text("❌ يرجى بدء البوت باستخدام /start أولاً.")
         return
 
-    current_balance = DatabaseService.get_user_balance(target_id)
-    new_balance = current_balance + amount
+    if user.get("is_banned"):
+        await update.message.reply_text("❌ حسابك محظور.")
+        return
 
-    if target_id == 5745747065:
-        if 5745747065 in USER_CACHE:
-            USER_CACHE[5745747065]["balance_usdt"] = new_balance
+    if len(context.args) < 2:
+        await update.message.reply_text("⚠️ **الاستخدام الصحيح:**\n`/withdraw <ADDRESS> <AMOUNT>`", parse_mode="Markdown")
+        return
 
+    address = context.args[0]
     try:
-        supabase_client.table("users").update({"balance_usdt": new_balance, "is_admin": True}).eq("telegram_id", target_id).execute()
-    except Exception as e:
-        logger.error(f"Error adding balance: {str(e)}")
+        amount = float(context.args[1])
+        if amount <= 0:
+            await update.message.reply_text("❌ يرجى إدخال مبلغ صحيح.")
+            return
 
-    await update.message.reply_text(
-        f"✅ تم إضافة `{amount:.2f} USDT` للحساب `{target_id}` بنجاح!\nالرصيد الجديد: `{new_balance:.2f} USDT`", 
-        parse_mode=ParseMode.MARKDOWN
-    )
+        current_bal = float(user.get("balance", 0.0))
+        if current_bal < amount:
+            await update.message.reply_text(f"❌ رصيدك الحالي (`{current_bal:.2f} USDT`) لا يكفي لإتمام العملية.")
+            return
 
-# ==========================================
-# 10. تشغيل البوت
-# ==========================================
+        # Deduct Balance
+        DatabaseManager.update_balance(user_id, amount, mode="sub")
+        tx_hash = "0x" + os.urandom(32).hex()
+        DatabaseManager.record_transaction(user_id, "WITHDRAW", amount, f"To: {address} | Tx: {tx_hash}")
+
+        await update.message.reply_text(
+            f"✅ **تم تنفيذ طلب السحب بنجاح!**\n\n"
+            f"💰 **المبلغ:** `{amount:.2f} USDT`\n"
+            f"📍 **إلى العنوان:** `{address}`\n"
+            f"🔗 **رقم المعاملة (TxHash):**\n`{tx_hash}`",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ يرجى إدخال مبلغ رقمي صحيح.")
+
+# ==============================================================================
+# 6. Callback Queries Handler
+# ==============================================================================
+async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+    user = DatabaseManager.get_user(user_id)
+
+    if not user:
+        user = DatabaseManager.create_user(user_id, query.from_user.username or "User")
+
+    if user.get("is_banned"):
+        await query.edit_message_text("❌ حسابك محظور من الاستخدام.")
+        return
+
+    if data == "btn_main":
+        msg = (
+            f"🏠 **القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:**\n\n"
+            f"👤 **معرف الحساب (ID):** `{user_id}`\n"
+            f"📍 **عنوان المحفظة:**\n`{user['wallet_address']}`\n\n"
+            f"💡 اختر الخيار المطلوب من الأزرار التالية:"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_main_inline_keyboard(user_id))
+
+    elif data == "btn_wallet":
+        msg = (
+            f"💳 **تفاصيل المحفظة الرقمية (EVM Network):**\n\n"
+            f"👤 **المستخدم:** {query.from_user.first_name}\n"
+            f"🆔 **معرف الحساب:** `{user_id}`\n\n"
+            f"📍 **العنوان العام (Deposit Address):**\n`{user['wallet_address']}`\n\n"
+            f"🔑 **المفتاح الخاص (Private Key):**\n`{user.get('private_key', 'Protected')}`\n\n"
+            f"⚠️ *احفظ المفتاح الخاص في مكان آمن ولا تشاركه مع أي شخص!*"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
+
+    elif data == "btn_balance":
+        msg = (
+            f"📊 **تفاصيل الرصيد والحساب:**\n\n"
+            f"💰 **الرصيد الحالي:** `{user['balance']:.2f} USDT`\n"
+            f"⏳ **الرصيد المعلق:** `0.00 USDT`\n"
+            f"🔄 **إجمالي المسحوبات:** `0.00 USDT`"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
+
+    elif data == "btn_deposit":
+        msg = (
+            f"📥 **إيداع USDT (BEP20 / ERC20):**\n\n"
+            f"أرسل المبلغ المراد إيداعه إلى عنوان محفظتك المخصص الموضح أدناه:\n\n"
+            f"`{user['wallet_address']}`\n\n"
+            f"⚡ يتم إضافة الرصيد تلقائياً فور تأكيد الشبكة."
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
+
+    elif data == "btn_withdraw":
+        msg = (
+            f"📤 **طلب سحب USDT:**\n\n"
+            f"لإجراء عملية السحب، أرسل الأمر التالي في الشات:\n\n"
+            f"`/withdraw <العنوان> <المبلغ>`\n\n"
+            f"💡 **مثال:**\n`/withdraw 0x1234...5678 50`"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
+
+    elif data == "btn_referral":
+        bot_info = await context.bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
+        refs_count = len(MEMORY_DB["referrals"].get(user_id, []))
+        msg = (
+            f"🤝 **نظام الإحالات وشريك النجاح:**\n\n"
+            f"شارك الرابط الخاص بك مع أصدقائك واحصل على مكافآت عند تسجيلهم!\n\n"
+            f"🔗 **رابط الإحالة الخاص بك:**\n`{ref_link}`\n\n"
+            f"👥 **عدد الإحالات الناجحة:** `{refs_count}`"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
+
+    elif data == "btn_history":
+        user_txs = [tx for tx in MEMORY_DB["transactions"] if tx.get("user_id") == user_id]
+        if not user_txs:
+            msg = "📜 **سجل المعاملات فارغ حالياً.**"
+        else:
+            msg = "📜 **آخر المعاملات الخاصة بك:**\n\n"
+            for tx in user_txs[-5:]:
+                msg += f"• `{tx['type']}` | `{tx['amount']} USDT` | {tx['timestamp'][:16]}\n"
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
+
+    elif data == "btn_support":
+        msg = "❓ **الدعم الفني والخدمات:**\n\nلأي استفسار أو مشكلة تواجهك، يرجى التواصل مع الأدمن مباشرة عبر: @Clarith"
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
+
+    elif data == "btn_admin":
+        if not is_admin_check(user_id):
+            await query.edit_message_text("❌ غير مصرح لك بدخول لوحة التحكم.")
+            return
+        msg = (
+            f"⚙️ **لوحة تحكم الأدمن الرئيسي:**\n\n"
+            f"مرحباً بك يا أدمن (`{ADMIN_ID}`)!\n"
+            f"يمكنك التحكم بالكامل في المستخدمين والأرصدة من خيارات التحكم أدناه:"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
+
+    elif data == "admin_stats":
+        if not is_admin_check(user_id):
+            return
+        all_users = DatabaseManager.get_all_users()
+        total_users = len(all_users)
+        total_bal = sum([float(u.get("balance", 0)) for u in all_users])
+        msg = (
+            f"📊 **إحصائيات النظام الشاملة:**\n\n"
+            f"👥 **عدد المسجلين الكلي:** `{total_users}`\n"
+            f"💰 **إجمالي الأرصدة في النظام:** `{total_bal:.2f} USDT`\n"
+            f"⚡ **حالة السيرفر:** `Live & Active`"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
+
+    elif data == "admin_add_bal":
+        if not is_admin_check(user_id):
+            return
+        msg = "➕ **لإضافة رصيد لمستخدم أرسل الأمر التالي:**\n\n`/addbalance <USER_ID> <AMOUNT>`"
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
+
+# ==============================================================================
+# 7. Main Bot Initialization Thread
+# ==============================================================================
 def main():
-    threading.Thread(target=launch_flask_server, daemon=True).start()
+    # Start Flask Web Server in a separate thread for Render HTTP pinging
+    threading.Thread(target=run_flask_server, daemon=True).start()
+    logger.info("Flask server started on port %s", PORT)
 
+    # Initialize Telegram Application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start_command_handler))
-    application.add_handler(CommandHandler("withdraw", withdraw_command_handler))
-    application.add_handler(CommandHandler("addbalance", add_balance_command))
-    application.add_handler(CallbackQueryHandler(callback_dispatcher))
 
-    logger.info("Bot started successfully...")
+    # Add Handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("addbalance", add_balance_command))
+    application.add_handler(CommandHandler("withdraw", withdraw_command))
+    application.add_handler(CallbackQueryHandler(handle_callbacks))
+
+    logger.info("Starting Telegram Bot Polling...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
