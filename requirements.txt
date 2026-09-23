@@ -1,7 +1,7 @@
-python-telegram-bot==20.7
-supabase==2.3.0
-web3==6.15.0
-requests==2.31.0
-flask==3.0.0
-gunicorn==21.2.0
-pycryptodome==3.20.0
+python-telegram-bot
+supabase
+web3
+requests
+flask
+gunicorn
+pycryptodome
