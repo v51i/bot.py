@@ -8,7 +8,15 @@ from supabase import create_client, Client
 from web3 import Web3
 
 # ----------------
-# Flask Web Server (سيرفر وهمي لتشغيل الخدمة مجاناً على Render)
+# 1. القيم المباشرة (Direct Configuration)
+# ----------------
+TELEGRAM_BOT_TOKEN = "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU"
+SUPABASE_URL = "https://ljhzazmrcwmjaloubylb.supabase.co"
+SUPABASE_KEY = "EyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxqaHphem1yY3dtamFsb3VieWxiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAxODYxNjAsImV4cCI6MjEwNTc2MjE2MH0.8g8YR9CmhIzUS44EPSstCwgRSJt2m2isoaOLICp_3As"
+ADMIN_ID = 5745747065
+
+# ----------------
+# 2. Flask Web Server (سيرفر وهمي لـ Render)
 # ----------------
 app_flask = Flask(__name__)
 
@@ -21,14 +29,9 @@ def run_flask():
     app_flask.run(host="0.0.0.0", port=port)
 
 # ----------------
-# Telegram Bot & Logic
+# 3. Telegram Bot Setup
 # ----------------
 logging.basicConfig(level=logging.INFO)
-
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "5745747065"))
 
 # Supabase Client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -119,15 +122,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 def main():
-    # تشغيل سيرفر Flask في Thread منفصل لكي لا يعطل عمل البوت
+    # تشغيل سيرفر Flask الوهمي
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # تشغيل بوت التلغرام
+    # تشغيل البوت
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    print("Bot is running with Fake Web Server...")
+    print("Bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
