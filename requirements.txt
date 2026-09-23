@@ -1,2 +1,4 @@
-urllib3
-requests
+flask
+httpx
+python-telegram-bot==20.7
+gunicorn
