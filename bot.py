@@ -1,14 +1,30 @@
 import os
 import logging
+import threading
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from supabase import create_client, Client
 from web3 import Web3
 
-# Logging
+# ----------------
+# Flask Web Server (سيرفر وهمي لتشغيل الخدمة مجاناً على Render)
+# ----------------
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "USDT Telegram Bot is running live!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app_flask.run(host="0.0.0.0", port=port)
+
+# ----------------
+# Telegram Bot & Logic
+# ----------------
 logging.basicConfig(level=logging.INFO)
 
-# Env Vars
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -29,7 +45,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
     
     if not res.data:
-        # Generate new BSC / TRON compatible EVM wallet
         account = w3.eth.account.create()
         wallet_address = account.address
         private_key = account._private_key.hex()
@@ -104,11 +119,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 def main():
+    # تشغيل سيرفر Flask في Thread منفصل لكي لا يعطل عمل البوت
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # تشغيل بوت التلغرام
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    print("Bot is running...")
+    print("Bot is running with Fake Web Server...")
     app.run_polling()
 
 if __name__ == "__main__":
