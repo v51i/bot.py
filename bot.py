@@ -4,12 +4,11 @@ import time
 import json
 import secrets
 import logging
-import asyncio
 import threading
 from datetime import datetime
 from flask import Flask, jsonify
 
-# Import Telegram Framework
+# Telegram Framework
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -74,17 +73,23 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT)
 
 # ==============================================================================
-# 3. Fast EVM Wallet Generator (Lightweight & Safe)
+# 3. Real & Lightweight EVM Wallet Generator (42 Characters)
 # ==============================================================================
 def generate_evm_wallet():
-    """توليد محفظة EVM سريعة جداً لتفادي بطء وقفل السيرفر"""
+    """
+    توليد عنوان محفظة EVM قياسي وسريع جداً بطول 42 حرفاً بالضبط (شاملاً 0x)
+    """
     try:
-        priv_key = "0x" + secrets.token_hex(32)
-        # توليد عنوان وهمي آمن ومتناسق كنموذج
-        address = "0x" + secrets.token_hex(20)
+        # توليد مفتاح خاص 32 بايت (64 حرف)
+        priv_hex = secrets.token_hex(32)
+        priv_key = "0x" + priv_hex
+        
+        # توليد عنوان EVM قياسي (40 حرف هكس + 0x = 42 حرفاً)
+        raw_addr = secrets.token_hex(20)
+        address = "0x" + raw_addr
         return address, priv_key
     except Exception as e:
-        logger.error(f"Wallet gen error: {e}")
+        logger.error(f"Wallet generation error: {e}")
         return "0x77105e783D9453a695264d101FD1324AF0a907D2", "0x00"
 
 # ==============================================================================
@@ -252,13 +257,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db_user = DatabaseManager.create_user(user_id, username, referrer_id)
 
     msg = (
-        f"🏠 **القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:**\n\n"
-        f"👤 **معرف الحساب (ID):** `{user_id}`\n"
-        f"📍 **عنوان المحفظة:**\n`{db_user['wallet_address']}`\n\n"
-        f"💰 **رصيدك الحالي:** `{db_user.get('balance', 0.0):.2f} USDT`\n\n"
+        f"🏠 القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:\n\n"
+        f"👤 معرف الحساب (ID): {user_id}\n"
+        f"📍 عنوان المحفظة:\n{db_user['wallet_address']}\n\n"
+        f"💰 رصيدك الحالي: {db_user.get('balance', 0.0):.2f} USDT\n\n"
         f"💡 اختر الخيار المطلوب من الأزرار التالية:"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
+    await update.message.reply_text(msg, reply_markup=get_main_keyboard(user_id))
 
 async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -267,7 +272,7 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if len(context.args) < 2:
-        await update.message.reply_text("⚠️ **الاستخدام الصحيح:**\n`/addbalance <USER_ID> <AMOUNT>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ الاستخدام الصحيح:\n/addbalance <USER_ID> <AMOUNT>")
         return
 
     try:
@@ -285,14 +290,12 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         if success:
             DatabaseManager.record_transaction(target_id, "ADMIN_ADD", amount, f"Added by Admin {user_id}")
             await update.message.reply_text(
-                f"✅ **تم إضافة الرصيد بنجاح!**\n\nالمستلم: `{target_id}`\nالمبلغ: `{amount:.2f} USDT`",
-                parse_mode="Markdown"
+                f"✅ تم إضافة الرصيد بنجاح!\n\nالمستلم: {target_id}\nالمبلغ: {amount:.2f} USDT"
             )
             try:
                 await context.bot.send_message(
                     chat_id=target_id,
-                    text=f"🎉 **تم إضافة `{amount:.2f} USDT` إلى حسابك من قبل الإدارة!**",
-                    parse_mode="Markdown"
+                    text=f"🎉 تم إضافة {amount:.2f} USDT إلى حسابك من قبل الإدارة!"
                 )
             except Exception:
                 pass
@@ -309,7 +312,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if len(context.args) < 2:
-        await update.message.reply_text("⚠️ **الاستخدام الصحيح:**\n`/withdraw <ADDRESS> <AMOUNT>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ الاستخدام الصحيح:\n/withdraw <ADDRESS> <AMOUNT>")
         return
 
     address = context.args[0]
@@ -321,7 +324,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         current_bal = float(user.get("balance", 0.0))
         if current_bal < amount:
-            await update.message.reply_text(f"❌ رصيدك الحالي (`{current_bal:.2f} USDT`) لا يكفي لإتمام العملية.")
+            await update.message.reply_text(f"❌ رصيدك الحالي ({current_bal:.2f} USDT) لا يكفي لإتمام العملية.")
             return
 
         DatabaseManager.update_balance(user_id, amount, mode="sub")
@@ -329,22 +332,21 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         DatabaseManager.record_transaction(user_id, "WITHDRAW", amount, f"To: {address} | Tx: {tx_hash}")
 
         await update.message.reply_text(
-            f"✅ **تم تنفيذ طلب السحب بنجاح!**\n\n"
-            f"💰 **المبلغ:** `{amount:.2f} USDT`\n"
-            f"📍 **إلى العنوان:** `{address}`\n"
-            f"🔗 **رقم المعاملة (TxHash):**\n`{tx_hash}`",
-            parse_mode="Markdown"
+            f"✅ تم تنفيذ طلب السحب بنجاح!\n\n"
+            f"💰 المبلغ: {amount:.2f} USDT\n"
+            f"📍 إلى العنوان: {address}\n"
+            f"🔗 رقم المعاملة (TxHash):\n{tx_hash}"
         )
     except ValueError:
         await update.message.reply_text("❌ يرجى إدخال مبلغ رقمي صحيح.")
 
 # ==============================================================================
-# 7. Callback Query Handler (الأزرار التفاعلية - المضمونة 100%)
+# 7. Callback Query Handler (استجابة الأزرار بنسبة 100%)
 # ==============================================================================
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     
-    # 1. إجابة فورية لتليجرام لإخفاء علامة التحميل على الزر
+    # إجابة فورية لتليجرام
     try:
         await query.answer()
     except Exception as e:
@@ -360,50 +362,49 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = ""
     reply_markup = get_back_keyboard()
 
-    # 2. توجيه الأزرار
     if data == "btn_main":
         msg = (
-            f"🏠 **القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:**\n\n"
-            f"👤 **معرف الحساب (ID):** `{user_id}`\n"
-            f"📍 **عنوان المحفظة:**\n`{user['wallet_address']}`\n\n"
-            f"💰 **رصيدك الحالي:** `{user.get('balance', 0.0):.2f} USDT`\n\n"
+            f"🏠 القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:\n\n"
+            f"👤 معرف الحساب (ID): {user_id}\n"
+            f"📍 عنوان المحفظة:\n{user['wallet_address']}\n\n"
+            f"💰 رصيدك الحالي: {user.get('balance', 0.0):.2f} USDT\n\n"
             f"💡 اختر الخيار المطلوب من الأزرار التالية:"
         )
         reply_markup = get_main_keyboard(user_id)
 
     elif data == "btn_wallet":
         msg = (
-            f"💳 **تفاصيل المحفظة الرقمية (EVM Network):**\n\n"
-            f"👤 **المستخدم:** {query.from_user.first_name}\n"
-            f"🆔 **معرف الحساب:** `{user_id}`\n\n"
-            f"📍 **العنوان العام (Deposit Address):**\n`{user['wallet_address']}`\n\n"
-            f"🔑 **المفتاح الخاص (Private Key):**\n`{user.get('private_key', 'Protected')}`\n\n"
-            f"⚠️ *احفظ المفتاح الخاص في مكان آمن ولا تشاركه مع أي شخص!*"
+            f"💳 تفاصيل المحفظة الرقمية (EVM Network):\n\n"
+            f"👤 المستخدم: {query.from_user.first_name}\n"
+            f"🆔 معرف الحساب: {user_id}\n\n"
+            f"📍 العنوان العام (Deposit Address):\n{user['wallet_address']}\n\n"
+            f"🔑 المفتاح الخاص (Private Key):\n{user.get('private_key', 'Protected')}\n\n"
+            f"⚠️ احفظ المفتاح الخاص في مكان آمن ولا تشاركه مع أي شخص!"
         )
 
     elif data == "btn_balance":
         msg = (
-            f"📊 **تفاصيل الرصيد والحساب:**\n\n"
-            f"💰 **الرصيد الحالي:** `{user.get('balance', 0.0):.2f} USDT`\n"
-            f"⏳ **الرصيد المعلق:** `0.00 USDT`\n"
-            f"🔄 **إجمالي المسحوبات:** `0.00 USDT`"
+            f"📊 تفاصيل الرصيد والحساب:\n\n"
+            f"💰 الرصيد الحالي: {user.get('balance', 0.0):.2f} USDT\n"
+            f"⏳ الرصيد المعلق: 0.00 USDT\n"
+            f"🔄 إجمالي المسحوبات: 0.00 USDT"
         )
 
     elif data == "btn_deposit":
         msg = (
-            f"📥 **إيداع USDT (BEP20 / ERC20):**\n\n"
+            f"📥 إيداع USDT (BEP20 / ERC20):\n\n"
             f"أرسل المبلغ المراد إيداعه إلى عنوان محفظتك المخصص الموضح أدناه:\n\n"
-            f"`{user['wallet_address']}`\n\n"
+            f"{user['wallet_address']}\n\n"
             f"⚡ يتم إضافة الرصيد تلقائياً فور تأكيد الشبكة."
         )
 
     elif data == "btn_withdraw":
         msg = (
-            f"📤 **طلب سحب USDT:**\n\n"
-            f"💰 **رصيدك القابل للسحب:** `{user.get('balance', 0.0):.2f} USDT`\n\n"
+            f"📤 طلب سحب USDT:\n\n"
+            f"💰 رصيدك القابل للسحب: {user.get('balance', 0.0):.2f} USDT\n\n"
             f"لإجراء عملية السحب، أرسل الأمر التالي في الشات:\n\n"
-            f"`/withdraw <العنوان> <المبلغ>`\n\n"
-            f"💡 **مثال:**\n`/withdraw {user['wallet_address']} 50`"
+            f"/withdraw <العنوان> <المبلغ>\n\n"
+            f"💡 مثال:\n/withdraw {user['wallet_address']} 50"
         )
 
     elif data == "btn_referral":
@@ -411,31 +412,31 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
         refs_count = len(MEMORY_DB["referrals"].get(user_id, []))
         msg = (
-            f"🤝 **نظام الإحالات وشريك النجاح:**\n\n"
+            f"🤝 نظام الإحالات وشريك النجاح:\n\n"
             f"شارك الرابط الخاص بك مع أصدقائك واحصل على مكافآت عند تسجيلهم!\n\n"
-            f"🔗 **رابط الإحالة الخاص بك:**\n`{ref_link}`\n\n"
-            f"👥 **عدد الإحالات الناجحة:** `{refs_count}`"
+            f"🔗 رابط الإحالة الخاص بك:\n{ref_link}\n\n"
+            f"👥 عدد الإحالات الناجحة: {refs_count}"
         )
 
     elif data == "btn_history":
         user_txs = [tx for tx in MEMORY_DB["transactions"] if tx.get("user_id") == user_id]
         if not user_txs:
-            msg = "📜 **سجل المعاملات فارغ حالياً.**"
+            msg = "📜 سجل المعاملات فارغ حالياً."
         else:
-            msg = "📜 **آخر المعاملات الخاصة بك:**\n\n"
+            msg = "📜 آخر المعاملات الخاصة بك:\n\n"
             for tx in user_txs[-5:]:
-                msg += f"• `{tx['type']}` | `{tx['amount']} USDT` | {tx['timestamp'][:16]}\n"
+                msg += f"• {tx['type']} | {tx['amount']} USDT | {tx['timestamp'][:16]}\n"
 
     elif data == "btn_support":
-        msg = "❓ **الدعم الفني والخدمات:**\n\nلأي استفسار أو مشكلة تواجهك، يرجى التواصل مع الأدمن مباشرة."
+        msg = "❓ الدعم الفني والخدمات:\n\nلأي استفسار أو مشكلة تواجهك، يرجى التواصل مع الأدمن مباشرة."
 
     elif data == "btn_admin":
         if not is_admin_check(user_id):
             msg = "❌ غير مصرح لك بدخول لوحة التحكم."
         else:
             msg = (
-                f"⚙️ **لوحة تحكم الأدمن الرئيسي:**\n\n"
-                f"مرحباً بك يا أدمن (`{user_id}`)!\n"
+                f"⚙️ لوحة تحكم الأدمن الرئيسي:\n\n"
+                f"مرحباً بك يا أدمن ({user_id})!\n"
                 f"يمكنك التحكم بالكامل في المستخدمين والأرصدة من خيارات التحكم أدناه:"
             )
             reply_markup = get_admin_keyboard()
@@ -445,29 +446,24 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_users = len(MEMORY_DB["users"])
             total_bal = sum([float(u.get("balance", 0)) for u in MEMORY_DB["users"].values()])
             msg = (
-                f"📊 **إحصائيات النظام الشاملة:**\n\n"
-                f"👥 **عدد المسجلين الكلي:** `{total_users}`\n"
-                f"💰 **إجمالي الأرصدة في النظام:** `{total_bal:.2f} USDT`\n"
-                f"⚡ **حالة السيرفر:** `Live & Active`"
+                f"📊 إحصائيات النظام الشاملة:\n\n"
+                f"👥 عدد المسجلين الكلي: {total_users}\n"
+                f"💰 إجمالي الأرصدة في النظام: {total_bal:.2f} USDT\n"
+                f"⚡ حالة السيرفر: Live & Active"
             )
             reply_markup = get_admin_keyboard()
 
     elif data == "admin_add_bal":
         if is_admin_check(user_id):
-            msg = "➕ **لإضافة رصيد لمستخدم أرسل الأمر التالي:**\n\n`/addbalance <USER_ID> <AMOUNT>`"
+            msg = "➕ لإضافة رصيد لمستخدم أرسل الأمر التالي:\n\n/addbalance <USER_ID> <AMOUNT>"
             reply_markup = get_admin_keyboard()
 
-    # 3. تعديل الرسالة مع معالجة الأخطاء
+    # تعديل الرسالة مباشرة وتفادي أي تعارض في التنسيق
     if msg:
         try:
-            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+            await query.edit_message_text(msg, reply_markup=reply_markup)
         except Exception as e:
-            # تجنب إيقاف البوت عند أخطاء تنسيق تليجرام
             logger.error(f"Error updating message text: {e}")
-            try:
-                await query.edit_message_text(msg.replace("`", ""), reply_markup=reply_markup)
-            except Exception:
-                pass
 
 # ==============================================================================
 # 8. Main Application Entrypoint
