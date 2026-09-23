@@ -33,8 +33,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# قائمة معرفات الأدمن (تشمل آيدي حسابك الحالي)
-ADMIN_IDS = [8952278702, 5745747065]
+# قائمة معرفات الأدمن مع دعم الجلب من Render Environment
+RAW_ADMINS = os.getenv("ADMIN_IDS", "8952278702,5745747065")
+ADMIN_IDS = [int(i.strip()) for i in RAW_ADMINS.split(",") if i.strip().isdigit()]
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -42,10 +43,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 PORT = int(os.getenv("PORT", "8080"))
 WEB3_PROVIDER_URL = os.getenv("WEB3_PROVIDER_URL", "https://bsc-dataseed.binance.org/")
 
-# Initialize Web3
 w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URL))
 
-# Initialize Supabase Client
 supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -54,7 +53,6 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         logger.error(f"Failed to initialize Supabase: {e}")
 
-# In-Memory Database Fallback
 MEMORY_DB = {
     "users": {},
     "transactions": [],
@@ -261,6 +259,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏠 **القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:**\n\n"
         f"👤 **معرف الحساب (ID):** `{user_id}`\n"
         f"📍 **عنوان المحفظة:**\n`{db_user['wallet_address']}`\n\n"
+        f"💰 **رصيدك الحالي:** `{db_user.get('balance', 0.0):.2f} USDT`\n\n"
         f"💡 اختر الخيار المطلوب من الأزرار التالية:"
     )
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_inline_keyboard(user_id))
@@ -282,7 +281,6 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ يجب أن يكون المبلغ أكبر من 0.")
             return
 
-        # إنشاء المستلم في حال لم يسبق له تشغيل البوت
         target_user = DatabaseManager.get_user(target_id)
         if not target_user:
             target_user = DatabaseManager.create_user(target_id, f"User_{target_id}")
@@ -349,11 +347,16 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ يرجى إدخال مبلغ رقمي صحيح.")
 
 # ==============================================================================
-# 6. Callback Queries Handler
+# 6. Callback Queries Handler (معالجة ضغطات الأزرار بشكل مباشر ومضمون)
 # ==============================================================================
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    
+    # الإجابة الفورية لمنع تعليق الزر
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     user_id = query.from_user.id
     data = query.data
@@ -363,17 +366,24 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = DatabaseManager.create_user(user_id, query.from_user.username or "User")
 
     if user.get("is_banned"):
-        await query.edit_message_text("❌ حسابك محظور من الاستخدام.")
+        try:
+            await query.edit_message_text("❌ حسابك محظور من الاستخدام.")
+        except Exception:
+            pass
         return
+
+    msg = ""
+    reply_markup = get_back_keyboard()
 
     if data == "btn_main":
         msg = (
             f"🏠 **القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:**\n\n"
             f"👤 **معرف الحساب (ID):** `{user_id}`\n"
             f"📍 **عنوان المحفظة:**\n`{user['wallet_address']}`\n\n"
+            f"💰 **رصيدك الحالي:** `{user.get('balance', 0.0):.2f} USDT`\n\n"
             f"💡 اختر الخيار المطلوب من الأزرار التالية:"
         )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_main_inline_keyboard(user_id))
+        reply_markup = get_main_inline_keyboard(user_id)
 
     elif data == "btn_wallet":
         msg = (
@@ -384,16 +394,14 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔑 **المفتاح الخاص (Private Key):**\n`{user.get('private_key', 'Protected')}`\n\n"
             f"⚠️ *احفظ المفتاح الخاص في مكان آمن ولا تشاركه مع أي شخص!*"
         )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif data == "btn_balance":
         msg = (
             f"📊 **تفاصيل الرصيد والحساب:**\n\n"
-            f"💰 **الرصيد الحالي:** `{user['balance']:.2f} USDT`\n"
+            f"💰 **الرصيد الحالي:** `{user.get('balance', 0.0):.2f} USDT`\n"
             f"⏳ **الرصيد المعلق:** `0.00 USDT`\n"
             f"🔄 **إجمالي المسحوبات:** `0.00 USDT`"
         )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif data == "btn_deposit":
         msg = (
@@ -402,16 +410,15 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"`{user['wallet_address']}`\n\n"
             f"⚡ يتم إضافة الرصيد تلقائياً فور تأكيد الشبكة."
         )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif data == "btn_withdraw":
         msg = (
             f"📤 **طلب سحب USDT:**\n\n"
+            f"💰 **رصيدك القابل للسحب:** `{user.get('balance', 0.0):.2f} USDT`\n\n"
             f"لإجراء عملية السحب، أرسل الأمر التالي في الشات:\n\n"
             f"`/withdraw <العنوان> <المبلغ>`\n\n"
-            f"💡 **مثال:**\n`/withdraw 0x1234...5678 50`"
+            f"💡 **مثال:**\n`/withdraw {user['wallet_address']} 50`"
         )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif data == "btn_referral":
         bot_info = await context.bot.get_me()
@@ -423,7 +430,6 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔗 **رابط الإحالة الخاص بك:**\n`{ref_link}`\n\n"
             f"👥 **عدد الإحالات الناجحة:** `{refs_count}`"
         )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif data == "btn_history":
         user_txs = [tx for tx in MEMORY_DB["transactions"] if tx.get("user_id") == user_id]
@@ -433,42 +439,45 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "📜 **آخر المعاملات الخاصة بك:**\n\n"
             for tx in user_txs[-5:]:
                 msg += f"• `{tx['type']}` | `{tx['amount']} USDT` | {tx['timestamp'][:16]}\n"
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif data == "btn_support":
         msg = "❓ **الدعم الفني والخدمات:**\n\nلأي استفسار أو مشكلة تواجهك، يرجى التواصل مع الأدمن مباشرة."
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif data == "btn_admin":
         if not is_admin_check(user_id):
-            await query.edit_message_text("❌ غير مصرح لك بدخول لوحة التحكم.")
-            return
-        msg = (
-            f"⚙️ **لوحة تحكم الأدمن الرئيسي:**\n\n"
-            f"مرحباً بك يا أدمن (`{user_id}`)!\n"
-            f"يمكنك التحكم بالكامل في المستخدمين والأرصدة من خيارات التحكم أدناه:"
-        )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
+            msg = "❌ غير مصرح لك بدخول لوحة التحكم."
+        else:
+            msg = (
+                f"⚙️ **لوحة تحكم الأدمن الرئيسي:**\n\n"
+                f"مرحباً بك يا أدمن (`{user_id}`)!\n"
+                f"يمكنك التحكم بالكامل في المستخدمين والأرصدة من خيارات التحكم أدناه:"
+            )
+            reply_markup = get_admin_keyboard()
 
     elif data == "admin_stats":
-        if not is_admin_check(user_id):
-            return
-        all_users = DatabaseManager.get_all_users()
-        total_users = len(all_users)
-        total_bal = sum([float(u.get("balance", 0)) for u in all_users])
-        msg = (
-            f"📊 **إحصائيات النظام الشاملة:**\n\n"
-            f"👥 **عدد المسجلين الكلي:** `{total_users}`\n"
-            f"💰 **إجمالي الأرصدة في النظام:** `{total_bal:.2f} USDT`\n"
-            f"⚡ **حالة السيرفر:** `Live & Active`"
-        )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
+        if is_admin_check(user_id):
+            all_users = DatabaseManager.get_all_users()
+            total_users = len(all_users)
+            total_bal = sum([float(u.get("balance", 0)) for u in all_users])
+            msg = (
+                f"📊 **إحصائيات النظام الشاملة:**\n\n"
+                f"👥 **عدد المسجلين الكلي:** `{total_users}`\n"
+                f"💰 **إجمالي الأرصدة في النظام:** `{total_bal:.2f} USDT`\n"
+                f"⚡ **حالة السيرفر:** `Live & Active`"
+            )
+            reply_markup = get_admin_keyboard()
 
     elif data == "admin_add_bal":
-        if not is_admin_check(user_id):
-            return
-        msg = "➕ **لإضافة رصيد لمستخدم أرسل الأمر التالي:**\n\n`/addbalance <USER_ID> <AMOUNT>`"
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
+        if is_admin_check(user_id):
+            msg = "➕ **لإضافة رصيد لمستخدم أرسل الأمر التالي:**\n\n`/addbalance <USER_ID> <AMOUNT>`"
+            reply_markup = get_admin_keyboard()
+
+    # تحديث الرسالة بأمان دون توقف
+    if msg:
+        try:
+            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
 
 # ==============================================================================
 # 7. Main Bot Initialization Thread
