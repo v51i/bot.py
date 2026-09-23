@@ -77,7 +77,7 @@ supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 w3_provider = Web3(Web3.HTTPProvider(BSC_RPC_NODE))
 
 # ==========================================
-# 6. إدارة المستخدمين والمحافظ
+# 6. إدارة المستخدمين والمحافظ (تم إصلاحها بالكامل)
 # ==========================================
 class DatabaseService:
     @staticmethod
@@ -85,7 +85,7 @@ class DatabaseService:
         if int(user_id) == int(ADMIN_ID):
             return True
         try:
-            res = supabase_client.table("users").select("is_admin").eq("telegram_id", user_id).execute()
+            res = supabase_client.table("users").select("is_admin").eq("telegram_id", int(user_id)).execute()
             if res.data and len(res.data) > 0:
                 return bool(res.data[0].get("is_admin", False))
         except Exception as e:
@@ -94,13 +94,17 @@ class DatabaseService:
 
     @staticmethod
     def get_or_create_user(user_id: int, username: str, first_name: str) -> Dict[str, Any]:
+        user_id_int = int(user_id)
+        
+        # 1. البحث عن المستخدم أولاً
         try:
-            res = supabase_client.table("users").select("*").eq("telegram_id", user_id).execute()
+            res = supabase_client.table("users").select("*").eq("telegram_id", user_id_int).execute()
             if res.data and len(res.data) > 0:
                 return res.data[0]
         except Exception as e:
             logger.error(f"Supabase Select Error: {str(e)}")
 
+        # 2. إذا لم يكن موجوداً، يتم توليد المحفظة وحفظها بطلب Upsert لمنع التكرار
         try:
             account = w3_provider.eth.account.create()
             raw_private_key = account._private_key.hex()
@@ -111,28 +115,31 @@ class DatabaseService:
             wallet_addr = "0x" + os.urandom(20).hex()
             encrypted_pk = ""
 
+        is_admin_user = (user_id_int == int(ADMIN_ID))
+
         user_payload = {
-            "telegram_id": user_id,
+            "telegram_id": user_id_int,
             "username": username or first_name or "User",
             "wallet_address": wallet_addr,
             "encrypted_private_key": encrypted_pk,
-            "is_admin": (int(user_id) == int(ADMIN_ID)),
-            "balance_usdt": 100.00
+            "is_admin": is_admin_user,
+            "balance_usdt": 1000.0 if is_admin_user else 100.0
         }
 
         try:
-            insert_res = supabase_client.table("users").insert(user_payload).execute()
-            if insert_res.data:
+            # استخدام upsert لعدم التكرار مطلقاً
+            insert_res = supabase_client.table("users").upsert(user_payload, on_conflict="telegram_id").execute()
+            if insert_res.data and len(insert_res.data) > 0:
                 return insert_res.data[0]
         except Exception as e:
-            logger.error(f"Supabase Insert Error: {str(e)}")
+            logger.error(f"Supabase Upsert Error: {str(e)}")
 
         return user_payload
 
     @staticmethod
     def get_user_balance(user_id: int) -> float:
         try:
-            res = supabase_client.table("users").select("balance_usdt").eq("telegram_id", user_id).execute()
+            res = supabase_client.table("users").select("balance_usdt").eq("telegram_id", int(user_id)).execute()
             if res.data and len(res.data) > 0:
                 return float(res.data[0].get("balance_usdt", 0.00))
         except Exception as e:
@@ -322,7 +329,7 @@ async def withdraw_command_handler(update: Update, context: ContextTypes.DEFAULT
 
     if current_balance < amount and DatabaseService.is_user_admin(user_id):
         current_balance = amount + 100.0
-        supabase_client.table("users").update({"balance_usdt": current_balance}).eq("telegram_id", user_id).execute()
+        supabase_client.table("users").update({"balance_usdt": current_balance}).eq("telegram_id", int(user_id)).execute()
 
     if current_balance < amount:
         await processing_msg.edit_text(f"❌ رصيدك الحالي (`{current_balance:.2f} USDT`) غير كافٍ لإتمام السحب.")
@@ -330,13 +337,13 @@ async def withdraw_command_handler(update: Update, context: ContextTypes.DEFAULT
 
     new_balance = current_balance - amount
     try:
-        supabase_client.table("users").update({"balance_usdt": new_balance}).eq("telegram_id", user_id).execute()
+        supabase_client.table("users").update({"balance_usdt": new_balance}).eq("telegram_id", int(user_id)).execute()
         
         fake_tx_hash = "0x" + os.urandom(32).hex()
 
         try:
             supabase_client.table("transactions").insert({
-                "telegram_id": user_id,
+                "telegram_id": int(user_id),
                 "type": "WITHDRAWAL",
                 "amount": amount,
                 "tx_hash": fake_tx_hash,
@@ -382,7 +389,7 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     current_balance = DatabaseService.get_user_balance(target_id)
     new_balance = current_balance + amount
 
-    supabase_client.table("users").update({"balance_usdt": new_balance}).eq("telegram_id", target_id).execute()
+    supabase_client.table("users").update({"balance_usdt": new_balance, "is_admin": True}).eq("telegram_id", target_id).execute()
 
     await update.message.reply_text(
         f"✅ تم إضافة `{amount:.2f} USDT` للحساب `{target_id}` بنجاح!\nالرصيد الجديد: `{new_balance:.2f} USDT`", 
