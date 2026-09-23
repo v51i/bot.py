@@ -81,6 +81,18 @@ w3_provider = Web3(Web3.HTTPProvider(BSC_RPC_NODE))
 # ==========================================
 class DatabaseService:
     @staticmethod
+    def is_user_admin(user_id: int) -> bool:
+        if int(user_id) == int(ADMIN_ID):
+            return True
+        try:
+            res = supabase_client.table("users").select("is_admin").eq("telegram_id", user_id).execute()
+            if res.data and len(res.data) > 0:
+                return bool(res.data[0].get("is_admin", False))
+        except Exception as e:
+            logger.error(f"Error checking admin status: {str(e)}")
+        return False
+
+    @staticmethod
     def get_or_create_user(user_id: int, username: str, first_name: str) -> Dict[str, Any]:
         try:
             res = supabase_client.table("users").select("*").eq("telegram_id", user_id).execute()
@@ -104,8 +116,8 @@ class DatabaseService:
             "username": username or first_name or "User",
             "wallet_address": wallet_addr,
             "encrypted_private_key": encrypted_pk,
-            "is_admin": (user_id == ADMIN_ID),
-            "balance_usdt": 100.00  # رصيد اختباري أولي للم تجربة
+            "is_admin": (int(user_id) == int(ADMIN_ID)),
+            "balance_usdt": 100.00
         }
 
         try:
@@ -145,7 +157,7 @@ def main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("❓ الدعم الفني (Support)", callback_data="btn_support")
         ]
     ]
-    if user_id == ADMIN_ID:
+    if DatabaseService.is_user_admin(user_id):
         buttons.append([InlineKeyboardButton("⚙️ لوحة التحكم (Admin Panel)", callback_data="btn_admin")])
 
     return InlineKeyboardMarkup(buttons)
@@ -265,7 +277,7 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     elif action == "btn_admin":
-        if user_id != ADMIN_ID:
+        if not DatabaseService.is_user_admin(user_id):
             await query.edit_message_text("❌ غير مصرح لك بالدخول.")
             return
 
@@ -280,7 +292,7 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 # ==========================================
-# 9. معالجة السحب وإضافة الرصيد (المحلولة)
+# 9. معالجة السحب وإضافة الرصيد
 # ==========================================
 async def withdraw_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -308,8 +320,7 @@ async def withdraw_command_handler(update: Update, context: ContextTypes.DEFAULT
 
     current_balance = DatabaseService.get_user_balance(user_id)
 
-    # إذا كان الرصيد أقل من المطلوب، يتم شحن رصيد اختباري للأدمن تلقائياً لتسهيل تجربة السحب
-    if current_balance < amount and user_id == ADMIN_ID:
+    if current_balance < amount and DatabaseService.is_user_admin(user_id):
         current_balance = amount + 100.0
         supabase_client.table("users").update({"balance_usdt": current_balance}).eq("telegram_id", user_id).execute()
 
@@ -349,23 +360,34 @@ async def withdraw_command_handler(update: Update, context: ContextTypes.DEFAULT
 
 async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
+
+    if not DatabaseService.is_user_admin(user_id):
         await update.message.reply_text("❌ هذا الأمر خاص بالأدمن فقط.")
         return
 
     if len(context.args) < 2:
-        await update.message.reply_text("⚠️ الاستخدام الصحيح:\n`/addbalance <telegram_id> <amount>`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "⚠️ الاستخدام الصحيح:\n`/addbalance <telegram_id> <amount>`", 
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
-    target_id = int(context.args[0])
-    amount = float(context.args[1])
+    try:
+        target_id = int(context.args[0])
+        amount = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ يرجى كتابة الآيدي والمبلغ بأرقام صحيحة.")
+        return
 
     current_balance = DatabaseService.get_user_balance(target_id)
     new_balance = current_balance + amount
 
     supabase_client.table("users").update({"balance_usdt": new_balance}).eq("telegram_id", target_id).execute()
 
-    await update.message.reply_text(f"✅ تم إضافة `{amount} USDT` للحساب `{target_id}` بنجاح!\nالرصيد الجديد: `{new_balance} USDT`", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        f"✅ تم إضافة `{amount:.2f} USDT` للحساب `{target_id}` بنجاح!\nالرصيد الجديد: `{new_balance:.2f} USDT`", 
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 # ==========================================
 # 10. تشغيل البوت
