@@ -5,28 +5,23 @@ import json
 import logging
 import asyncio
 import threading
-from datetime import datetime, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime
+from flask import Flask, jsonify
 
 # Import Third-Party Libraries
 import requests
-from flask import Flask, jsonify, request
 from supabase import create_client, Client
 from web3 import Web3
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton
+    InlineKeyboardMarkup
 )
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
+    ContextTypes
 )
 
 # ==============================================================================
@@ -38,9 +33,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Basic Environment Variables & Fallbacks
+# قائمة معرفات الأدمن (تشمل آيدي حسابك الحالي)
+ADMIN_IDS = [8952278702, 5745747065]
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5745747065"))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 PORT = int(os.getenv("PORT", "8080"))
@@ -58,21 +54,9 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         logger.error(f"Failed to initialize Supabase: {e}")
 
-# In-Memory Fallback Storage (Used if Supabase is not connected)
+# In-Memory Database Fallback
 MEMORY_DB = {
-    "users": {
-        ADMIN_ID: {
-            "user_id": ADMIN_ID,
-            "username": "Admin",
-            "balance": 10000.0,
-            "wallet_address": "0x77105e783D9453a695264d101FD1324AF0a907D296454A067",
-            "private_key": "",
-            "is_admin": True,
-            "is_banned": False,
-            "referrer_id": None,
-            "joined_at": str(datetime.now())
-        }
-    },
+    "users": {},
     "transactions": [],
     "referrals": {}
 }
@@ -98,7 +82,7 @@ def run_flask_server():
     flask_app.run(host="0.0.0.0", port=PORT)
 
 # ==============================================================================
-# 3. Database Layer (Supabase / Memory Abstraction)
+# 3. Database Layer
 # ==============================================================================
 class DatabaseManager:
     @staticmethod
@@ -120,12 +104,11 @@ class DatabaseManager:
         if existing:
             return existing
 
-        # Generate EVM Wallet
         account = w3.eth.account.create()
         wallet_address = account.address
         private_key = account.key.hex()
 
-        is_admin_flag = (user_id == ADMIN_ID)
+        is_admin_flag = user_id in ADMIN_IDS
         user_data = {
             "user_id": user_id,
             "username": username or "User",
@@ -146,7 +129,6 @@ class DatabaseManager:
 
         MEMORY_DB["users"][user_id] = user_data
         
-        # Track Referrals
         if referrer_id and int(referrer_id) != user_id:
             DatabaseManager.add_referral(referrer_id, user_id)
 
@@ -173,17 +155,6 @@ class DatabaseManager:
         if user_id in MEMORY_DB["users"]:
             MEMORY_DB["users"][user_id]["balance"] = new_bal
         return True
-
-    @staticmethod
-    def set_ban_status(user_id: int, status: bool):
-        user_id = int(user_id)
-        if supabase:
-            try:
-                supabase.table("users").update({"is_banned": status}).eq("user_id", user_id).execute()
-            except Exception as e:
-                logger.error(f"Supabase error in set_ban_status: {e}")
-        if user_id in MEMORY_DB["users"]:
-            MEMORY_DB["users"][user_id]["is_banned"] = status
 
     @staticmethod
     def record_transaction(user_id: int, tx_type: str, amount: float, details: str = ""):
@@ -224,7 +195,7 @@ class DatabaseManager:
 # 4. Helper Functions & Keyboards
 # ==============================================================================
 def is_admin_check(user_id: int) -> bool:
-    return int(user_id) == ADMIN_ID
+    return int(user_id) in ADMIN_IDS
 
 def get_main_inline_keyboard(user_id: int):
     keyboard = [
@@ -252,15 +223,7 @@ def get_admin_keyboard():
     keyboard = [
         [
             InlineKeyboardButton("➕ إضافة رصيد", callback_data="admin_add_bal"),
-            InlineKeyboardButton("➖ خصم رصيد", callback_data="admin_sub_bal")
-        ],
-        [
-            InlineKeyboardButton("🚫 حظر مستخدم", callback_data="admin_ban"),
-            InlineKeyboardButton("✅ فك حظر", callback_data="admin_unban")
-        ],
-        [
-            InlineKeyboardButton("📊 إحصائيات النظام", callback_data="admin_stats"),
-            InlineKeyboardButton("📢 إذاعة جماعية (Broadcast)", callback_data="admin_broadcast")
+            InlineKeyboardButton("📊 إحصائيات النظام", callback_data="admin_stats")
         ],
         [
             InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="btn_main")
@@ -272,14 +235,13 @@ def get_back_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="btn_main")]])
 
 # ==============================================================================
-# 5. Telegram Bot Command Handlers
+# 5. Command Handlers
 # ==============================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     username = user.username or user.first_name
 
-    # Extract Referral Code
     referrer_id = None
     if context.args and len(context.args) > 0:
         try:
@@ -296,11 +258,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = (
-        f"👋 أهلاً بك يا **{username}** في بوت المحفظة والخدمات الرقمية!\n\n"
+        f"🏠 **القائمة الرئيسية لمكافأة وحساب USDT الخاص بك:**\n\n"
         f"👤 **معرف الحساب (ID):** `{user_id}`\n"
-        f"📍 **عنوان محفظتك (EVM):**\n`{db_user['wallet_address']}`\n\n"
-        f"💰 **الرصيد الحالي:** `{db_user['balance']:.2f} USDT`\n\n"
-        f"اختر من الأزرار أدناه للتحكم بحسابك:"
+        f"📍 **عنوان المحفظة:**\n`{db_user['wallet_address']}`\n\n"
+        f"💡 اختر الخيار المطلوب من الأزرار التالية:"
     )
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_inline_keyboard(user_id))
 
@@ -321,6 +282,11 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ يجب أن يكون المبلغ أكبر من 0.")
             return
 
+        # إنشاء المستلم في حال لم يسبق له تشغيل البوت
+        target_user = DatabaseManager.get_user(target_id)
+        if not target_user:
+            target_user = DatabaseManager.create_user(target_id, f"User_{target_id}")
+
         success = DatabaseManager.update_balance(target_id, amount, mode="add")
         if success:
             DatabaseManager.record_transaction(target_id, "ADMIN_ADD", amount, f"Added by Admin {user_id}")
@@ -328,7 +294,6 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ **تم إضافة الرصيد بنجاح!**\n\nالمستلم: `{target_id}`\nالمبلغ: `{amount:.2f} USDT`",
                 parse_mode="Markdown"
             )
-            # Notify User
             try:
                 await context.bot.send_message(
                     chat_id=target_id,
@@ -338,7 +303,7 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             except Exception:
                 pass
         else:
-            await update.message.reply_text("❌ فشل إضافة الرصيد. قد يكون المستخدم غير موجود.")
+            await update.message.reply_text("❌ فشل إضافة الرصيد.")
     except ValueError:
         await update.message.reply_text("❌ يرجى التأكد من كتابة الآيدي والمبلغ بأرقام صحيحة.")
 
@@ -369,7 +334,6 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ رصيدك الحالي (`{current_bal:.2f} USDT`) لا يكفي لإتمام العملية.")
             return
 
-        # Deduct Balance
         DatabaseManager.update_balance(user_id, amount, mode="sub")
         tx_hash = "0x" + os.urandom(32).hex()
         DatabaseManager.record_transaction(user_id, "WITHDRAW", amount, f"To: {address} | Tx: {tx_hash}")
@@ -472,7 +436,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif data == "btn_support":
-        msg = "❓ **الدعم الفني والخدمات:**\n\nلأي استفسار أو مشكلة تواجهك، يرجى التواصل مع الأدمن مباشرة عبر: @Clarith"
+        msg = "❓ **الدعم الفني والخدمات:**\n\nلأي استفسار أو مشكلة تواجهك، يرجى التواصل مع الأدمن مباشرة."
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif data == "btn_admin":
@@ -481,7 +445,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         msg = (
             f"⚙️ **لوحة تحكم الأدمن الرئيسي:**\n\n"
-            f"مرحباً بك يا أدمن (`{ADMIN_ID}`)!\n"
+            f"مرحباً بك يا أدمن (`{user_id}`)!\n"
             f"يمكنك التحكم بالكامل في المستخدمين والأرصدة من خيارات التحكم أدناه:"
         )
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
@@ -510,14 +474,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 7. Main Bot Initialization Thread
 # ==============================================================================
 def main():
-    # Start Flask Web Server in a separate thread for Render HTTP pinging
     threading.Thread(target=run_flask_server, daemon=True).start()
     logger.info("Flask server started on port %s", PORT)
 
-    # Initialize Telegram Application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Add Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("addbalance", add_balance_command))
     application.add_handler(CommandHandler("withdraw", withdraw_command))
