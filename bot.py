@@ -76,7 +76,6 @@ def launch_flask_server():
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 w3_provider = Web3(Web3.HTTPProvider(BSC_RPC_NODE))
 
-# ذاكرة مؤقتة لمنع إعادة إنشاء محفظة الأدمن في حال وجود مشكلة بالشبكة
 USER_CACHE = {}
 
 # ==========================================
@@ -85,8 +84,8 @@ USER_CACHE = {}
 class DatabaseService:
     @staticmethod
     def is_user_admin(user_id: int) -> bool:
-        # فحص مباشر وسريع لأيدي الأدمن
-        if int(user_id) == int(ADMIN_ID):
+        # مقارنة المكون بأكثر من صورة لضمان التوافق التام
+        if str(user_id).strip() == str(ADMIN_ID).strip():
             return True
         try:
             res = supabase_client.table("users").select("is_admin").eq("telegram_id", int(user_id)).execute()
@@ -100,20 +99,21 @@ class DatabaseService:
     def get_or_create_user(user_id: int, username: str, first_name: str) -> Dict[str, Any]:
         user_id_int = int(user_id)
         
-        # 1. التحقق من الذاكرة المؤقتة (تمنع التكرار تماماً لنفس الجلسة)
         if user_id_int in USER_CACHE:
             return USER_CACHE[user_id_int]
 
-        # 2. الاستعلام من Supabase
         try:
             res = supabase_client.table("users").select("*").eq("telegram_id", user_id_int).execute()
             if res.data and len(res.data) > 0:
-                USER_CACHE[user_id_int] = res.data[0]
-                return res.data[0]
+                user_data = res.data[0]
+                # إعطاء صلاحية الأدمن تلقائياً لحسابك
+                if str(user_id_int) == str(ADMIN_ID):
+                    user_data["is_admin"] = True
+                USER_CACHE[user_id_int] = user_data
+                return user_data
         except Exception as e:
             logger.error(f"Supabase Select Exception: {str(e)}")
 
-        # 3. إنشاء المحفظة عند العدم
         try:
             account = w3_provider.eth.account.create()
             raw_private_key = account._private_key.hex()
@@ -124,7 +124,7 @@ class DatabaseService:
             wallet_addr = "0x" + os.urandom(20).hex()
             encrypted_pk = ""
 
-        is_admin_user = (user_id_int == int(ADMIN_ID))
+        is_admin_user = (str(user_id_int) == str(ADMIN_ID))
 
         user_payload = {
             "telegram_id": user_id_int,
@@ -135,7 +135,6 @@ class DatabaseService:
             "balance_usdt": 10000.0 if is_admin_user else 100.0
         }
 
-        # 4. محاولة الحفظ في قاعدة البيانات
         try:
             insert_res = supabase_client.table("users").insert(user_payload).execute()
             if insert_res.data and len(insert_res.data) > 0:
