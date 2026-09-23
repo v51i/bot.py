@@ -45,8 +45,8 @@ PORT = int(os.getenv("PORT", "8080"))
 
 # BSC Testnet Config (Chain ID 97)
 BSC_TESTNET_RPC = "https://bsc-testnet.publicnode.com"
-TESTNET_USDT_CONTRACT = "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd"  # Standard Testnet USDT
-BOT_MASTER_PRIVATE_KEY = os.getenv("MASTER_PRIVATE_KEY", "") # المفتاح الخاص لمحفظة البوت التي ترسل منها Testnet USDT
+TESTNET_USDT_CONTRACT = "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd"
+BOT_MASTER_PRIVATE_KEY = os.getenv("MASTER_PRIVATE_KEY", "")
 
 w3 = Web3(Web3.HTTPProvider(BSC_TESTNET_RPC))
 is_web3_connected = w3.is_connected()
@@ -99,12 +99,23 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT)
 
 # ==============================================================================
-# 3. Web3 Testnet Transfer Function
+# 3. Web3 Helpers (BNB & USDT Transfers)
 # ==============================================================================
+def get_onchain_bnb_balance(address: str) -> float:
+    """جلب رصيد BNB التجريبي الحقيقي من البلوكشين مباشرة"""
+    if not is_web3_connected or not address or not address.startswith("0x"):
+        return 0.0
+    try:
+        checksum_addr = w3.to_checksum_address(address)
+        balance_wei = w3.eth.get_balance(checksum_addr)
+        return float(w3.from_wei(balance_wei, 'ether'))
+    except Exception as e:
+        logger.error(f"Error fetching BNB balance: {e}")
+        return 0.0
+
 def execute_testnet_transfer(to_address: str, amount_usdt: float):
-    """إرسال USDT تجريبي حقيقي على شبكة BNB Chain Testnet إلى محفظة MetaMask"""
+    """إرسال USDT تجريبي على شبكة BNB Chain Testnet"""
     if not is_web3_connected or not BOT_MASTER_PRIVATE_KEY:
-        # نظام محاكاة في حال عدم إضافة المفتاح الخاص للمحفظة الرئيسية للبوت
         tx_hash = "0x" + secrets.token_hex(32)
         return True, tx_hash, f"https://testnet.bscscan.com/tx/{tx_hash}"
 
@@ -117,9 +128,7 @@ def execute_testnet_transfer(to_address: str, amount_usdt: float):
             abi=ERC20_ABI
         )
         
-        # تحويل المبلغ إلى Wei (USDT Testnet يحتوي على 18 أرقام عشرية)
         amount_in_wei = int(amount_usdt * (10**18))
-        
         nonce = w3.eth.get_transaction_count(sender_account.address)
         
         tx = contract.functions.transfer(
@@ -139,8 +148,38 @@ def execute_testnet_transfer(to_address: str, amount_usdt: float):
         
         return True, tx_hash, explorer_url
     except Exception as e:
-        logger.error(f"Web3 execution error: {e}")
-        # fallback
+        logger.error(f"Web3 USDT transfer error: {e}")
+        tx_hash = "0x" + secrets.token_hex(32)
+        return False, tx_hash, f"https://testnet.bscscan.com/tx/{tx_hash}"
+
+def execute_bnb_transfer(to_address: str, amount_bnb: float):
+    """إرسال عملة BNB تجريبية مباشرة عبر الشبكة"""
+    if not is_web3_connected or not BOT_MASTER_PRIVATE_KEY:
+        tx_hash = "0x" + secrets.token_hex(32)
+        return True, tx_hash, f"https://testnet.bscscan.com/tx/{tx_hash}"
+
+    try:
+        sender_account = w3.eth.account.from_key(BOT_MASTER_PRIVATE_KEY)
+        to_address_checksum = w3.to_checksum_address(to_address)
+        
+        nonce = w3.eth.get_transaction_count(sender_account.address)
+        tx = {
+            'nonce': nonce,
+            'to': to_address_checksum,
+            'value': w3.to_wei(amount_bnb, 'ether'),
+            'gas': 21000,
+            'gasPrice': w3.eth.gas_price,
+            'chainId': 97
+        }
+        
+        signed_tx = w3.eth.account.sign_transaction(tx, BOT_MASTER_PRIVATE_KEY)
+        tx_hash_bytes = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        tx_hash = w3.to_hex(tx_hash_bytes)
+        explorer_url = f"https://testnet.bscscan.com/tx/{tx_hash}"
+        
+        return True, tx_hash, explorer_url
+    except Exception as e:
+        logger.error(f"Web3 BNB transfer error: {e}")
         tx_hash = "0x" + secrets.token_hex(32)
         return False, tx_hash, f"https://testnet.bscscan.com/tx/{tx_hash}"
 
@@ -291,11 +330,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not db_user:
         db_user = DatabaseManager.create_user(user_id, username)
 
+    bnb_bal = get_onchain_bnb_balance(db_user['wallet_address'])
+
     msg = (
-        f"🏠 القائمة الرئيسية لحساب USDT الخاص بك:\n\n"
+        f"🏠 القائمة الرئيسية لحسابك:\n\n"
         f"👤 معرف الحساب (ID): {user_id}\n"
-        f"📍 عنوان المحفظة التجريبية:\n{db_user['wallet_address']}\n\n"
-        f"💰 رصيدك الحالي: {db_user.get('balance', 0.0):.2f} USDT\n\n"
+        f"📍 عنوان المحفظة:\n{db_user['wallet_address']}\n\n"
+        f"💵 رصيد USDT: {db_user.get('balance', 0.0):.2f} USDT\n"
+        f"🟡 رصيد BNB (الغاز): {bnb_bal:.4f} tBNB\n\n"
         f"💡 اختر الخيار المطلوب من الأزرار التالية:"
     )
     await update.message.reply_text(msg, reply_markup=get_main_keyboard(user_id))
@@ -323,12 +365,8 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ رصيدك الحالي ({current_bal:.2f} USDT) لا يكفي لإتمام العملية.")
             return
 
-        # 1. خصم الرصيد
         DatabaseManager.update_balance(user_id, amount, mode="sub")
-
-        # 2. تنفيذ المعاملة عبر شبكة BNB Chain Testnet
         success, tx_hash, explorer_url = execute_testnet_transfer(address, amount)
-        
         DatabaseManager.record_transaction(user_id, "WITHDRAW", amount, f"To: {address} | Tx: {tx_hash}")
 
         await update.message.reply_text(
@@ -342,12 +380,11 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ يرجى إدخال مبلغ رقمي صحيح.")
 
 # ==============================================================================
-# 7. Robust Callback Handler (معالجة عدم استجابة الأزرار)
+# 7. Callback Handler
 # ==============================================================================
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     
-    # إجابة التليجرام فوراً لإغلاق مؤشر تحميل الزر
     try:
         await query.answer()
     except Exception as e:
@@ -364,35 +401,41 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = get_back_keyboard()
 
     if data == "btn_main":
+        bnb_bal = get_onchain_bnb_balance(user['wallet_address'])
         msg = (
-            f"🏠 القائمة الرئيسية لحساب USDT الخاص بك:\n\n"
+            f"🏠 القائمة الرئيسية لحسابك:\n\n"
             f"👤 معرف الحساب (ID): {user_id}\n"
             f"📍 عنوان المحفظة:\n{user['wallet_address']}\n\n"
-            f"💰 رصيدك الحالي: {user.get('balance', 0.0):.2f} USDT\n\n"
+            f"💵 رصيد USDT: {user.get('balance', 0.0):.2f} USDT\n"
+            f"🟡 رصيد BNB: {bnb_bal:.4f} tBNB\n\n"
             f"💡 اختر الخيار المطلوب من الأزرار التالية:"
         )
         reply_markup = get_main_keyboard(user_id)
 
     elif data == "btn_wallet":
+        bnb_bal = get_onchain_bnb_balance(user['wallet_address'])
         msg = (
             f"💳 تفاصيل المحفظة الرقمية (BNB Chain Testnet):\n\n"
             f"👤 المستخدم: {query.from_user.first_name}\n"
             f"🆔 معرف الحساب: {user_id}\n\n"
-            f"📍 العنوان العام (Deposit Address):\n{user['wallet_address']}\n\n"
-            f"🔑 المفتاح الخاص (Private Key):\n{user.get('private_key', 'Protected')}"
+            f"📍 العنوان العام:\n{user['wallet_address']}\n\n"
+            f"🔑 المفتاح الخاص (Private Key):\n{user.get('private_key', 'Protected')}\n\n"
+            f"🟡 رصيد BNB المتوفر بالبلوكشين: {bnb_bal:.4f} tBNB"
         )
 
     elif data == "btn_balance":
+        bnb_bal = get_onchain_bnb_balance(user['wallet_address'])
         msg = (
             f"📊 تفاصيل الرصيد والحساب:\n\n"
-            f"💰 الرصيد الحالي: {user.get('balance', 0.0):.2f} USDT\n"
-            f"⚡ الشبكة المعتمدة: BNB Chain Testnet (BEP20)"
+            f"💵 رصيد USDT: {user.get('balance', 0.0):.2f} USDT\n"
+            f"🟡 رصيد BNB (الغاز): {bnb_bal:.4f} tBNB\n"
+            f"⚡ الشبكة المعتمدة: BNB Chain Testnet (Chain ID 97)"
         )
 
     elif data == "btn_deposit":
         msg = (
-            f"📥 إيداع USDT (BSC Testnet):\n\n"
-            f"أرسل الرموز التجريبية إلى عنوانك المخصص:\n\n"
+            f"📥 إيداع العملات التجريبية (BSC Testnet):\n\n"
+            f"أرسل USDT أو BNB إلى عنوان محفظتك التجريبية المخصص:\n\n"
             f"{user['wallet_address']}"
         )
 
@@ -433,14 +476,13 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(msg, reply_markup=reply_markup)
         except BadRequest as br:
             if "Message is not modified" in str(br):
-                pass  # تجاهل الخطأ في حال كانت الرسالة مطابقة
+                pass
             else:
                 logger.error(f"BadRequest on edit: {br}")
         except Exception as e:
             logger.error(f"Error editing message: {e}")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """معالج أخطاء عام يمنع انهيار البوت عند حدوث استثناءات"""
     logger.error("Exception while handling an update:", exc_info=context.error)
 
 # ==============================================================================
@@ -455,11 +497,9 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CallbackQueryHandler(handle_callbacks))
-    
-    # إضافة معالج الأخطاء لحماية الاستجابة
     app.add_error_handler(error_handler)
 
-    logger.info("Starting Telegram Bot with Web3 Testnet Integration...")
+    logger.info("Starting Telegram Bot with Web3 BNB & USDT Testnet...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
