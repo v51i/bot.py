@@ -1,4 +1,7 @@
-flask
-httpx
 python-telegram-bot==20.7
-gunicorn
+Flask==3.0.0
+gunicorn==21.2.0
+httpx==0.26.0
+supabase
+pycryptodome
+requests
