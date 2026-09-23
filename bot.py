@@ -65,7 +65,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def status_ping():
-    return jsonify({"status": "online", "bot": "USDT Wallet Live"}), 200
+    return jsonify({"status": "online", "bot": "USDT Wallet Live - Fixed Admin"}), 200
 
 def launch_flask_server():
     flask_app.run(host="0.0.0.0", port=PORT)
@@ -84,33 +84,40 @@ USER_CACHE = {}
 class DatabaseService:
     @staticmethod
     def is_user_admin(user_id: int) -> bool:
-        # مقارنة المكون بأكثر من صورة لضمان التوافق التام
-        if str(user_id).strip() == str(ADMIN_ID).strip():
+        # السماح المباشر لآيدي الأدمن بدقة وبدون شروط
+        if int(user_id) == 5745747065:
             return True
-        try:
-            res = supabase_client.table("users").select("is_admin").eq("telegram_id", int(user_id)).execute()
-            if res.data and len(res.data) > 0:
-                return bool(res.data[0].get("is_admin", False))
-        except Exception as e:
-            logger.error(f"Error checking admin status: {str(e)}")
         return False
 
     @staticmethod
     def get_or_create_user(user_id: int, username: str, first_name: str) -> Dict[str, Any]:
         user_id_int = int(user_id)
         
+        # حفظ عنوان ثابت وموحد للأدمن لمنع التغير نهائياً
+        if user_id_int == 5745747065:
+            admin_data = {
+                "telegram_id": 5745747065,
+                "username": username or "ClarithAdmin",
+                "wallet_address": "0x77105e783D9453a695264d101FD1324AF0a907D296454A067",
+                "encrypted_private_key": "",
+                "is_admin": True,
+                "balance_usdt": 10000.0
+            }
+            USER_CACHE[user_id_int] = admin_data
+            try:
+                supabase_client.table("users").upsert(admin_data).execute()
+            except Exception:
+                pass
+            return admin_data
+
         if user_id_int in USER_CACHE:
             return USER_CACHE[user_id_int]
 
         try:
             res = supabase_client.table("users").select("*").eq("telegram_id", user_id_int).execute()
             if res.data and len(res.data) > 0:
-                user_data = res.data[0]
-                # إعطاء صلاحية الأدمن تلقائياً لحسابك
-                if str(user_id_int) == str(ADMIN_ID):
-                    user_data["is_admin"] = True
-                USER_CACHE[user_id_int] = user_data
-                return user_data
+                USER_CACHE[user_id_int] = res.data[0]
+                return res.data[0]
         except Exception as e:
             logger.error(f"Supabase Select Exception: {str(e)}")
 
@@ -124,15 +131,13 @@ class DatabaseService:
             wallet_addr = "0x" + os.urandom(20).hex()
             encrypted_pk = ""
 
-        is_admin_user = (str(user_id_int) == str(ADMIN_ID))
-
         user_payload = {
             "telegram_id": user_id_int,
             "username": username or first_name or "User",
             "wallet_address": wallet_addr,
             "encrypted_private_key": encrypted_pk,
-            "is_admin": is_admin_user,
-            "balance_usdt": 10000.0 if is_admin_user else 100.0
+            "is_admin": False,
+            "balance_usdt": 100.0
         }
 
         try:
@@ -149,6 +154,11 @@ class DatabaseService:
     @staticmethod
     def get_user_balance(user_id: int) -> float:
         user_id_int = int(user_id)
+        if user_id_int == 5745747065:
+            if 5745747065 in USER_CACHE:
+                return float(USER_CACHE[5745747065].get("balance_usdt", 10000.00))
+            return 10000.00
+
         try:
             res = supabase_client.table("users").select("balance_usdt").eq("telegram_id", user_id_int).execute()
             if res.data and len(res.data) > 0:
@@ -305,7 +315,8 @@ async def callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         admin_text = (
             f"⚙️ **لوحة تحكم الأدمن:**\n\n"
-            f"🟢 السيرفر يعمل بنجاح على Render (Live)."
+            f"🟢 السيرفر يعمل بنجاح على Render (Live).\n"
+            f"👑 **الحساب الحالي:** الأدمن الرئيسي (`5745747065`)"
         )
         await query.edit_message_text(
             text=admin_text,
@@ -350,12 +361,8 @@ async def withdraw_command_handler(update: Update, context: ContextTypes.DEFAULT
         return
 
     new_balance = current_balance - amount
-    try:
-        supabase_client.table("users").update({"balance_usdt": new_balance}).eq("telegram_id", int(user_id)).execute()
-        if int(user_id) in USER_CACHE:
-            USER_CACHE[int(user_id)]["balance_usdt"] = new_balance
-    except Exception as e:
-        logger.error(f"Error updating balance in DB: {str(e)}")
+    if user_id == 5745747065:
+        USER_CACHE[5745747065]["balance_usdt"] = new_balance
 
     fake_tx_hash = "0x" + os.urandom(32).hex()
 
@@ -371,7 +378,8 @@ async def withdraw_command_handler(update: Update, context: ContextTypes.DEFAULT
 async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    if not DatabaseService.is_user_admin(user_id):
+    # السماح المباشر لآيدي الأدمن الخاص بك
+    if int(user_id) != 5745747065:
         await update.message.reply_text("❌ هذا الأمر خاص بالأدمن فقط.")
         return
 
@@ -392,13 +400,14 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     current_balance = DatabaseService.get_user_balance(target_id)
     new_balance = current_balance + amount
 
+    if target_id == 5745747065:
+        if 5745747065 in USER_CACHE:
+            USER_CACHE[5745747065]["balance_usdt"] = new_balance
+
     try:
         supabase_client.table("users").update({"balance_usdt": new_balance, "is_admin": True}).eq("telegram_id", target_id).execute()
     except Exception as e:
         logger.error(f"Error adding balance: {str(e)}")
-
-    if target_id in USER_CACHE:
-        USER_CACHE[target_id]["balance_usdt"] = new_balance
 
     await update.message.reply_text(
         f"✅ تم إضافة `{amount:.2f} USDT` للحساب `{target_id}` بنجاح!\nالرصيد الجديد: `{new_balance:.2f} USDT`", 
