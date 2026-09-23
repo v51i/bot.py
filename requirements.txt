@@ -5,3 +5,4 @@ httpx
 supabase
 pycryptodome
 requests
+web3
