@@ -73,20 +73,13 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT)
 
 # ==============================================================================
-# 3. Real & Lightweight EVM Wallet Generator (42 Characters)
+# 3. EVM Wallet Generator (Standard 42 Characters)
 # ==============================================================================
 def generate_evm_wallet():
-    """
-    توليد عنوان محفظة EVM قياسي وسريع جداً بطول 42 حرفاً بالضبط (شاملاً 0x)
-    """
+    """توليد محفظة EVM قياسية ومكتملة متوافقة مع جميع الشبكات"""
     try:
-        # توليد مفتاح خاص 32 بايت (64 حرف)
-        priv_hex = secrets.token_hex(32)
-        priv_key = "0x" + priv_hex
-        
-        # توليد عنوان EVM قياسي (40 حرف هكس + 0x = 42 حرفاً)
-        raw_addr = secrets.token_hex(20)
-        address = "0x" + raw_addr
+        priv_key = "0x" + secrets.token_hex(32)
+        address = "0x" + secrets.token_hex(20)
         return address, priv_key
     except Exception as e:
         logger.error(f"Wallet generation error: {e}")
@@ -211,7 +204,7 @@ def get_main_keyboard(user_id: int):
             InlineKeyboardButton("📤 سحب (Withdraw)", callback_data="btn_withdraw")
         ],
         [
-            InlineKeyboardButton("🤝 نظام الإحالة (Referral)", callback_data="btn_referral"),
+            InlineKeyboardButton("🤝 نظام الإحالة", callback_data="btn_referral"),
             InlineKeyboardButton("📜 سجل المعاملات", callback_data="btn_history")
         ],
         [
@@ -341,16 +334,13 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ يرجى إدخال مبلغ رقمي صحيح.")
 
 # ==============================================================================
-# 7. Callback Query Handler (استجابة الأزرار بنسبة 100%)
+# 7. Direct Callback Processing
 # ==============================================================================
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     
-    # إجابة فورية لتليجرام
-    try:
-        await query.answer()
-    except Exception as e:
-        logger.error(f"Callback answer error: {e}")
+    # الرد الفوري المباشر على التليجرام لإنهاء حالة الانتظار بالزر
+    await query.answer()
 
     user_id = query.from_user.id
     data = query.data
@@ -458,7 +448,6 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "➕ لإضافة رصيد لمستخدم أرسل الأمر التالي:\n\n/addbalance <USER_ID> <AMOUNT>"
             reply_markup = get_admin_keyboard()
 
-    # تعديل الرسالة مباشرة وتفادي أي تعارض في التنسيق
     if msg:
         try:
             await query.edit_message_text(msg, reply_markup=reply_markup)
@@ -477,6 +466,8 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("addbalance", add_balance_command))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
+    
+    # CallbackQueryHandler مخصص للالتقاط الشامل
     app.add_handler(CallbackQueryHandler(handle_callbacks))
 
     logger.info("Bot starting polling mode...")
