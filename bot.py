@@ -8,7 +8,7 @@ from supabase import create_client, Client
 from web3 import Web3
 
 # ----------------
-# 1. القيم المباشرة (Direct Configuration)
+# 1. الإعدادات والمفاتيح المباشرة
 # ----------------
 TELEGRAM_BOT_TOKEN = "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU"
 SUPABASE_URL = "https://ljhzazmrcwmjaloubylb.supabase.co"
@@ -16,7 +16,7 @@ SUPABASE_KEY = "EyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 ADMIN_ID = 5745747065
 
 # ----------------
-# 2. Flask Web Server (سيرفر وهمي لـ Render)
+# 2. خادم Flask الوهمي لتشغيل الخدمة مجاناً على Render
 # ----------------
 app_flask = Flask(__name__)
 
@@ -29,7 +29,7 @@ def run_flask():
     app_flask.run(host="0.0.0.0", port=port)
 
 # ----------------
-# 3. Telegram Bot Setup
+# 3. إعدادات البوت وقاعدة البيانات
 # ----------------
 logging.basicConfig(level=logging.INFO)
 
@@ -122,7 +122,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 def main():
-    # تشغيل سيرفر Flask الوهمي
+    # تشغيل خادم Flask في مسار فرعي
     threading.Thread(target=run_flask, daemon=True).start()
 
     # تشغيل البوت
