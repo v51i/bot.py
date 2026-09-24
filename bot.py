@@ -8,7 +8,6 @@ import threading
 from datetime import datetime
 from flask import Flask, jsonify
 
-# Telegram Framework
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -18,14 +17,14 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
     ContextTypes
 )
 from telegram.error import BadRequest, TelegramError
 
-# Web3 Integration for BNB Chain Testnet
 from web3 import Web3
 
-# Logging Setup
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -33,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
-# 1. Configuration & Web3 Testnet Setup
+# 1. Configuration
 # ==============================================================================
 RAW_ADMINS = os.getenv("ADMIN_IDS", "8952278702,5745747065")
 ADMIN_IDS = [int(i.strip()) for i in RAW_ADMINS.split(",") if i.strip().isdigit()]
@@ -43,7 +42,6 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 PORT = int(os.getenv("PORT", "8080"))
 
-# BSC Testnet Config (Chain ID 97)
 BSC_TESTNET_RPC = "https://bsc-testnet.publicnode.com"
 TESTNET_USDT_CONTRACT = "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd"
 BOT_MASTER_PRIVATE_KEY = os.getenv("MASTER_PRIVATE_KEY", "")
@@ -52,7 +50,6 @@ w3 = Web3(Web3.HTTPProvider(BSC_TESTNET_RPC))
 is_web3_connected = w3.is_connected()
 logger.info(f"Web3 Testnet Connected: {is_web3_connected}")
 
-# Minimal ERC20 ABI for Transfer
 ERC20_ABI = [
     {
         "constant": False,
@@ -66,7 +63,6 @@ ERC20_ABI = [
     }
 ]
 
-# Supabase Setup
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -83,7 +79,7 @@ MEMORY_DB = {
 }
 
 # ==============================================================================
-# 2. Flask Keep-Alive Server
+# 2. Flask
 # ==============================================================================
 flask_app = Flask(__name__)
 
@@ -99,10 +95,9 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT)
 
 # ==============================================================================
-# 3. Web3 Helpers (BNB & USDT Transfers)
+# 3. Web3 Helpers
 # ==============================================================================
 def get_onchain_bnb_balance(address: str) -> float:
-    """جلب رصيد BNB التجريبي الحقيقي من البلوكشين مباشرة"""
     if not is_web3_connected or not address or not address.startswith("0x"):
         return 0.0
     try:
@@ -114,7 +109,6 @@ def get_onchain_bnb_balance(address: str) -> float:
         return 0.0
 
 def execute_testnet_transfer(to_address: str, amount_usdt: float):
-    """إرسال USDT تجريبي على شبكة BNB Chain Testnet"""
     if not is_web3_connected or not BOT_MASTER_PRIVATE_KEY:
         tx_hash = "0x" + secrets.token_hex(32)
         return True, tx_hash, f"https://testnet.bscscan.com/tx/{tx_hash}"
@@ -153,7 +147,6 @@ def execute_testnet_transfer(to_address: str, amount_usdt: float):
         return False, tx_hash, f"https://testnet.bscscan.com/tx/{tx_hash}"
 
 def execute_bnb_transfer(to_address: str, amount_bnb: float):
-    """إرسال عملة BNB تجريبية مباشرة عبر الشبكة"""
     if not is_web3_connected or not BOT_MASTER_PRIVATE_KEY:
         tx_hash = "0x" + secrets.token_hex(32)
         return True, tx_hash, f"https://testnet.bscscan.com/tx/{tx_hash}"
@@ -184,7 +177,7 @@ def execute_bnb_transfer(to_address: str, amount_bnb: float):
         return False, tx_hash, f"https://testnet.bscscan.com/tx/{tx_hash}"
 
 # ==============================================================================
-# 4. Database Layer
+# 4. Database
 # ==============================================================================
 class DatabaseManager:
     @staticmethod
@@ -276,7 +269,7 @@ class DatabaseManager:
                 logger.error(f"Supabase tx record err: {e}")
 
 # ==============================================================================
-# 5. UI Layouts
+# 5. UI
 # ==============================================================================
 def is_admin_check(user_id: int) -> bool:
     return int(user_id) in ADMIN_IDS
@@ -319,7 +312,7 @@ def get_back_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="btn_main")]])
 
 # ==============================================================================
-# 6. Telegram Command Handlers
+# 6. Handlers
 # ==============================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -335,12 +328,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"🏠 القائمة الرئيسية لحسابك:\n\n"
         f"👤 معرف الحساب (ID): {user_id}\n"
-        f"📍 عنوان المحفظة:\n{db_user['wallet_address']}\n\n"
+        f"📍 عنوان المحفظة:\n`{db_user['wallet_address']}`\n\n"
         f"💵 رصيد USDT: {db_user.get('balance', 0.0):.2f} USDT\n"
         f"🟡 رصيد BNB (الغاز): {bnb_bal:.4f} tBNB\n\n"
         f"💡 اختر الخيار المطلوب من الأزرار التالية:"
     )
-    await update.message.reply_text(msg, reply_markup=get_main_keyboard(user_id))
+    await update.message.reply_text(msg, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
 
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -369,22 +362,20 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success, tx_hash, explorer_url = execute_testnet_transfer(address, amount)
         DatabaseManager.record_transaction(user_id, "WITHDRAW", amount, f"To: {address} | Tx: {tx_hash}")
 
+        status = "✅ تم تنفيذ طلب السحب بنجاح" if success else "⚠️ تم خصم الرصيد لكن التحويل فشل"
         await update.message.reply_text(
-            f"✅ تم تنفيذ طلب السحب بنجاح على شبكة Testnet!\n\n"
+            f"{status} على شبكة Testnet!\n\n"
             f"💰 المبلغ: {amount:.2f} USDT\n"
-            f"📍 إلى العنوان: {address}\n"
-            f"🔗 رقم المعاملة (TxHash):\n{tx_hash}\n\n"
-            f"🌐 مستكشف البلوكشين:\n{explorer_url}"
+            f"📍 إلى العنوان: `{address}`\n"
+            f"🔗 رقم المعاملة (TxHash):\n`{tx_hash}`\n\n"
+            f"🌐 مستكشف البلوكشين:\n{explorer_url}",
+            parse_mode="Markdown"
         )
     except ValueError:
         await update.message.reply_text("❌ يرجى إدخال مبلغ رقمي صحيح.")
 
-# ==============================================================================
-# 7. Callback Handler
-# ==============================================================================
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    
     try:
         await query.answer()
     except Exception as e:
@@ -405,7 +396,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             f"🏠 القائمة الرئيسية لحسابك:\n\n"
             f"👤 معرف الحساب (ID): {user_id}\n"
-            f"📍 عنوان المحفظة:\n{user['wallet_address']}\n\n"
+            f"📍 عنوان المحفظة:\n`{user['wallet_address']}`\n\n"
             f"💵 رصيد USDT: {user.get('balance', 0.0):.2f} USDT\n"
             f"🟡 رصيد BNB: {bnb_bal:.4f} tBNB\n\n"
             f"💡 اختر الخيار المطلوب من الأزرار التالية:"
@@ -415,78 +406,137 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "btn_wallet":
         bnb_bal = get_onchain_bnb_balance(user['wallet_address'])
         msg = (
-            f"💳 تفاصيل المحفظة الرقمية (BNB Chain Testnet):\n\n"
-            f"👤 المستخدم: {query.from_user.first_name}\n"
-            f"🆔 معرف الحساب: {user_id}\n\n"
-            f"📍 العنوان العام:\n{user['wallet_address']}\n\n"
-            f"🔑 المفتاح الخاص (Private Key):\n{user.get('private_key', 'Protected')}\n\n"
-            f"🟡 رصيد BNB المتوفر بالبلوكشين: {bnb_bal:.4f} tBNB"
+            f"💳 تفاصيل المحفظة:\n\n"
+            f"👤 {query.from_user.first_name}\n"
+            f"🆔 {user_id}\n\n"
+            f"📍 العنوان:\n`{user['wallet_address']}`\n\n"
+            f"🔑 المفتاح الخاص:\n`{user.get('private_key', 'Protected')}`\n\n"
+            f"🟡 رصيد BNB: {bnb_bal:.4f} tBNB"
         )
 
     elif data == "btn_balance":
         bnb_bal = get_onchain_bnb_balance(user['wallet_address'])
         msg = (
-            f"📊 تفاصيل الرصيد والحساب:\n\n"
-            f"💵 رصيد USDT: {user.get('balance', 0.0):.2f} USDT\n"
-            f"🟡 رصيد BNB (الغاز): {bnb_bal:.4f} tBNB\n"
-            f"⚡ الشبكة المعتمدة: BNB Chain Testnet (Chain ID 97)"
+            f"📊 الرصيد:\n\n"
+            f"💵 USDT: {user.get('balance', 0.0):.2f}\n"
+            f"🟡 BNB: {bnb_bal:.4f} tBNB"
         )
 
     elif data == "btn_deposit":
         msg = (
-            f"📥 إيداع العملات التجريبية (BSC Testnet):\n\n"
-            f"أرسل USDT أو BNB إلى عنوان محفظتك التجريبية المخصص:\n\n"
-            f"{user['wallet_address']}"
+            f"📥 إيداع تجريبي:\n\n"
+            f"أرسل إلى عنوانك:\n`{user['wallet_address']}`\n\n"
+            f"(الرصيد الداخلي يضاف يدوياً من الأدمن حالياً)"
         )
 
     elif data == "btn_withdraw":
         msg = (
-            f"📤 طلب سحب USDT:\n\n"
-            f"💰 رصيدك القابل للسحب: {user.get('balance', 0.0):.2f} USDT\n\n"
-            f"لإجراء عملية السحب، أرسل الأمر التالي في الشات:\n\n"
-            f"/withdraw <العنوان> <المبلغ>"
+            f"📤 سحب (Testnet):\n\n"
+            f"💰 رصيدك: {user.get('balance', 0.0):.2f} USDT\n\n"
+            f"استخدم الأمر:\n"
+            f"`/withdraw <العنوان> <المبلغ>`\n\n"
+            f"مثال:\n"
+            f"`/withdraw 0x1234...abcd 10`"
         )
 
     elif data == "btn_referral":
         bot_info = await context.bot.get_me()
         ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
-        msg = f"🤝 رابط الإحالة الخاص بك:\n{ref_link}"
+        msg = f"🤝 رابط الإحالة:\n{ref_link}"
 
     elif data == "btn_history":
         user_txs = [tx for tx in MEMORY_DB["transactions"] if tx.get("user_id") == user_id]
         if not user_txs:
-            msg = "📜 سجل المعاملات فارغ حالياً."
+            msg = "📜 سجل المعاملات فارغ."
         else:
-            msg = "📜 آخر المعاملات الخاص بك:\n\n"
+            msg = "📜 آخر المعاملات:\n\n"
             for tx in user_txs[-5:]:
-                msg += f"• {tx['type']} | {tx['amount']} USDT | {tx['timestamp'][:16]}\n"
+                msg += f"• {tx['type']} | {tx['amount']} | {tx['timestamp'][:16]}\n"
 
     elif data == "btn_support":
-        msg = "❓ الدعم الفني: أرسل استفسارك وسيرد عليك الأدمن مباشرة."
+        msg = "❓ الدعم الفني: أرسل استفسارك هنا."
 
     elif data == "btn_admin":
         if not is_admin_check(user_id):
-            msg = "❌ غير مصرح لك بدخول لوحة التحكم."
+            msg = "❌ غير مصرح."
         else:
-            msg = f"⚙️ لوحة تحكم الأدمن الرئيسي ({user_id}):"
+            msg = f"⚙️ لوحة تحكم الأدمن ({user_id}):"
             reply_markup = get_admin_keyboard()
+
+    elif data == "admin_add_bal":
+        if not is_admin_check(user_id):
+            msg = "❌ غير مصرح."
+        else:
+            context.user_data["awaiting_admin_add"] = True
+            msg = (
+                "➕ إضافة رصيد\n\n"
+                "أرسل:\n"
+                "`معرف_المستخدم المبلغ`\n\n"
+                "مثال:\n"
+                "`8952278702 100`"
+            )
+
+    elif data == "admin_stats":
+        if not is_admin_check(user_id):
+            msg = "❌ غير مصرح."
+        else:
+            total_users = len(MEMORY_DB["users"])
+            total_balance = sum(float(u.get("balance", 0)) for u in MEMORY_DB["users"].values())
+            total_txs = len(MEMORY_DB["transactions"])
+            msg = (
+                f"📊 الإحصائيات:\n\n"
+                f"👥 المستخدمين: {total_users}\n"
+                f"💵 إجمالي الأرصدة: {total_balance:.2f} USDT\n"
+                f"📜 المعاملات: {total_txs}"
+            )
 
     if msg:
         try:
-            await query.edit_message_text(msg, reply_markup=reply_markup)
+            await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
         except BadRequest as br:
-            if "Message is not modified" in str(br):
-                pass
-            else:
-                logger.error(f"BadRequest on edit: {br}")
+            if "Message is not modified" not in str(br):
+                try:
+                    await query.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+                except:
+                    pass
         except Exception as e:
             logger.error(f"Error editing message: {e}")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if context.user_data.get("awaiting_admin_add") and is_admin_check(user_id):
+        context.user_data["awaiting_admin_add"] = False
+        parts = text.split()
+        if len(parts) < 2:
+            await update.message.reply_text("❌ الصيغة: معرف_المستخدم المبلغ")
+            return
+        try:
+            target_id = int(parts[0])
+            amount = float(parts[1])
+            target = DatabaseManager.get_user(target_id)
+            if not target:
+                target = DatabaseManager.create_user(target_id, f"User_{target_id}")
+            
+            DatabaseManager.update_balance(target_id, amount, mode="add")
+            DatabaseManager.record_transaction(target_id, "ADMIN_ADD", amount, f"By admin {user_id}")
+            
+            new_bal = float(DatabaseManager.get_user(target_id).get("balance", 0))
+            await update.message.reply_text(
+                f"✅ تم إضافة {amount:.2f} USDT للمستخدم `{target_id}`\n"
+                f"رصيده الجديد: {new_bal:.2f} USDT",
+                parse_mode="Markdown"
+            )
+        except ValueError:
+            await update.message.reply_text("❌ خطأ في البيانات.")
+        return
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Exception while handling an update:", exc_info=context.error)
 
 # ==============================================================================
-# 8. Main Entrypoint
+# 7. Main
 # ==============================================================================
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
@@ -497,6 +547,7 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CallbackQueryHandler(handle_callbacks))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
     logger.info("Starting Telegram Bot with Web3 BNB & USDT Testnet...")
