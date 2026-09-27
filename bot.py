@@ -32,12 +32,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
-# 1. Configuration
+# 1. Configuration (مكتوبة بشكل مباشر لتشغيل الكود فوراً)
 # ==============================================================================
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+RAW_ADMINS = "8952278702,5745747065"
 ADMIN_IDS = [int(i.strip()) for i in RAW_ADMINS.split(",") if i.strip().isdigit()]
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN = "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 PORT = int(os.getenv("PORT", "8080"))
@@ -475,7 +475,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "أرسل المعرف والمبلغ مفصولين بمسافة:\n"
                 "`معرف_المستخدم المبلغ`\n\n"
                 "مثال:\n"
-                "`123456789 100`"
+                "`8952278702 100`"
             )
 
     elif data == "admin_stats":
@@ -547,10 +547,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     logger.info("Flask server started.")
-
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN غير متوفر في متغيرات البيئة!")
-        return
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
