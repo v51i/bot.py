@@ -34,10 +34,10 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 # 1. Configuration
 # ==============================================================================
-RAW_ADMINS = os.getenv("ADMIN_IDS", "8952278702,5745747065")
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(i.strip()) for i in RAW_ADMINS.split(",") if i.strip().isdigit()]
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 PORT = int(os.getenv("PORT", "8080"))
@@ -137,7 +137,8 @@ def execute_testnet_transfer(to_address: str, amount_usdt: float):
         
         signed_tx = w3.eth.account.sign_transaction(tx, BOT_MASTER_PRIVATE_KEY)
         tx_hash_bytes = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        tx_hash = w3.to_hex(tx_hash_bytes)
+        
+        tx_hash = "0x" + tx_hash_bytes.hex() if not str(tx_hash_bytes).startswith("0x") else str(tx_hash_bytes)
         explorer_url = f"https://testnet.bscscan.com/tx/{tx_hash}"
         
         return True, tx_hash, explorer_url
@@ -167,7 +168,8 @@ def execute_bnb_transfer(to_address: str, amount_bnb: float):
         
         signed_tx = w3.eth.account.sign_transaction(tx, BOT_MASTER_PRIVATE_KEY)
         tx_hash_bytes = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        tx_hash = w3.to_hex(tx_hash_bytes)
+        
+        tx_hash = "0x" + tx_hash_bytes.hex() if not str(tx_hash_bytes).startswith("0x") else str(tx_hash_bytes)
         explorer_url = f"https://testnet.bscscan.com/tx/{tx_hash}"
         
         return True, tx_hash, explorer_url
@@ -327,7 +329,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         f"🏠 القائمة الرئيسية لحسابك:\n\n"
-        f"👤 معرف الحساب (ID): {user_id}\n"
+        f"👤 معرف الحساب (ID): `{user_id}`\n"
         f"📍 عنوان المحفظة:\n`{db_user['wallet_address']}`\n\n"
         f"💵 رصيد USDT: {db_user.get('balance', 0.0):.2f} USDT\n"
         f"🟡 رصيد BNB (الغاز): {bnb_bal:.4f} tBNB\n\n"
@@ -343,14 +345,14 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if len(context.args) < 2:
-        await update.message.reply_text("⚠️ الاستخدام الصحيح:\n/withdraw <ADDRESS> <AMOUNT>")
+        await update.message.reply_text("⚠️ الاستخدام الصحيح:\n`/withdraw <ADDRESS> <AMOUNT>`", parse_mode="Markdown")
         return
 
     address = context.args[0]
     try:
         amount = float(context.args[1])
         if amount <= 0:
-            await update.message.reply_text("❌ يرجى إدخال مبلغ صحيح.")
+            await update.message.reply_text("❌ يرجى إدخال مبلغ أكبر من الصفر.")
             return
 
         current_bal = float(user.get("balance", 0.0))
@@ -395,7 +397,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bnb_bal = get_onchain_bnb_balance(user['wallet_address'])
         msg = (
             f"🏠 القائمة الرئيسية لحسابك:\n\n"
-            f"👤 معرف الحساب (ID): {user_id}\n"
+            f"👤 معرف الحساب (ID): `{user_id}`\n"
             f"📍 عنوان المحفظة:\n`{user['wallet_address']}`\n\n"
             f"💵 رصيد USDT: {user.get('balance', 0.0):.2f} USDT\n"
             f"🟡 رصيد BNB: {bnb_bal:.4f} tBNB\n\n"
@@ -408,7 +410,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             f"💳 تفاصيل المحفظة:\n\n"
             f"👤 {query.from_user.first_name}\n"
-            f"🆔 {user_id}\n\n"
+            f"🆔 `{user_id}`\n\n"
             f"📍 العنوان:\n`{user['wallet_address']}`\n\n"
             f"🔑 المفتاح الخاص:\n`{user.get('private_key', 'Protected')}`\n\n"
             f"🟡 رصيد BNB: {bnb_bal:.4f} tBNB"
@@ -442,7 +444,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "btn_referral":
         bot_info = await context.bot.get_me()
         ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
-        msg = f"🤝 رابط الإحالة:\n{ref_link}"
+        msg = f"🤝 رابط الإحالة الخاص بك:\n`{ref_link}`"
 
     elif data == "btn_history":
         user_txs = [tx for tx in MEMORY_DB["transactions"] if tx.get("user_id") == user_id]
@@ -451,16 +453,16 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             msg = "📜 آخر المعاملات:\n\n"
             for tx in user_txs[-5:]:
-                msg += f"• {tx['type']} | {tx['amount']} | {tx['timestamp'][:16]}\n"
+                msg += f"• {tx['type']} | {tx['amount']} USDT | {tx['timestamp'][:16]}\n"
 
     elif data == "btn_support":
-        msg = "❓ الدعم الفني: أرسل استفسارك هنا."
+        msg = "❓ الدعم الفني: أرسل استفسارك مباشرة للأدمن."
 
     elif data == "btn_admin":
         if not is_admin_check(user_id):
-            msg = "❌ غير مصرح."
+            msg = "❌ غير مصرح لك بالدخول إلى لوحة الأدمن."
         else:
-            msg = f"⚙️ لوحة تحكم الأدمن ({user_id}):"
+            msg = f"⚙️ لوحة تحكم الأدمن (`{user_id}`):"
             reply_markup = get_admin_keyboard()
 
     elif data == "admin_add_bal":
@@ -469,11 +471,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             context.user_data["awaiting_admin_add"] = True
             msg = (
-                "➕ إضافة رصيد\n\n"
-                "أرسل:\n"
+                "➕ إضافة رصيد لمستخدم\n\n"
+                "أرسل المعرف والمبلغ مفصولين بمسافة:\n"
                 "`معرف_المستخدم المبلغ`\n\n"
                 "مثال:\n"
-                "`8952278702 100`"
+                "`123456789 100`"
             )
 
     elif data == "admin_stats":
@@ -484,10 +486,10 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_balance = sum(float(u.get("balance", 0)) for u in MEMORY_DB["users"].values())
             total_txs = len(MEMORY_DB["transactions"])
             msg = (
-                f"📊 الإحصائيات:\n\n"
-                f"👥 المستخدمين: {total_users}\n"
+                f"📊 إحصائيات النظام:\n\n"
+                f"👥 إجمالي المستخدمين: {total_users}\n"
                 f"💵 إجمالي الأرصدة: {total_balance:.2f} USDT\n"
-                f"📜 المعاملات: {total_txs}"
+                f"📜 عدد المعاملات: {total_txs}"
             )
 
     if msg:
@@ -497,7 +499,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if "Message is not modified" not in str(br):
                 try:
                     await query.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
-                except:
+                except Exception:
                     pass
         except Exception as e:
             logger.error(f"Error editing message: {e}")
@@ -510,11 +512,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_admin_add"] = False
         parts = text.split()
         if len(parts) < 2:
-            await update.message.reply_text("❌ الصيغة: معرف_المستخدم المبلغ")
+            await update.message.reply_text("❌ الصيغة الخاطئة! الصيغة الصحيحة: `معرف_المستخدم المبلغ`", parse_mode="Markdown")
             return
         try:
             target_id = int(parts[0])
             amount = float(parts[1])
+            if amount <= 0:
+                await update.message.reply_text("❌ يرجى إدخال مبلغ قيمته أكبر من الصفر.")
+                return
+
             target = DatabaseManager.get_user(target_id)
             if not target:
                 target = DatabaseManager.create_user(target_id, f"User_{target_id}")
@@ -524,12 +530,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             new_bal = float(DatabaseManager.get_user(target_id).get("balance", 0))
             await update.message.reply_text(
-                f"✅ تم إضافة {amount:.2f} USDT للمستخدم `{target_id}`\n"
-                f"رصيده الجديد: {new_bal:.2f} USDT",
+                f"✅ تم إضافة `{amount:.2f}` USDT للمستخدم `{target_id}` بنجاح.\n"
+                f"رصيده الجديد: `{new_bal:.2f}` USDT",
                 parse_mode="Markdown"
             )
         except ValueError:
-            await update.message.reply_text("❌ خطأ في البيانات.")
+            await update.message.reply_text("❌ خطأ في إدخال البيانات، يرجى التأكد من كتابة الأرقام بشكل صحيح.")
         return
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -541,6 +547,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     logger.info("Flask server started.")
+
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN غير متوفر في متغيرات البيئة!")
+        return
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
