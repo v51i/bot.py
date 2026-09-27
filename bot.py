@@ -5,6 +5,7 @@ import json
 import secrets
 import logging
 import threading
+import asyncio
 from datetime import datetime
 from flask import Flask, jsonify
 
@@ -46,7 +47,8 @@ BSC_TESTNET_RPC = "https://bsc-testnet.publicnode.com"
 TESTNET_USDT_CONTRACT = "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd"
 BOT_MASTER_PRIVATE_KEY = os.getenv("MASTER_PRIVATE_KEY", "")
 
-w3 = Web3(Web3.HTTPProvider(BSC_TESTNET_RPC))
+# ضبط Timeout للمقبض لمنع التعليق
+w3 = Web3(Web3.HTTPProvider(BSC_TESTNET_RPC, request_kwargs={'timeout': 3}))
 is_web3_connected = w3.is_connected()
 logger.info(f"Web3 Testnet Connected: {is_web3_connected}")
 
@@ -95,9 +97,9 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT)
 
 # ==============================================================================
-# 3. Web3 Helpers
+# 3. Web3 Helpers (Async Non-blocking)
 # ==============================================================================
-def get_onchain_bnb_balance(address: str) -> float:
+def _fetch_bnb_sync(address: str) -> float:
     if not is_web3_connected or not address or not address.startswith("0x"):
         return 0.0
     try:
@@ -106,6 +108,13 @@ def get_onchain_bnb_balance(address: str) -> float:
         return float(w3.from_wei(balance_wei, 'ether'))
     except Exception as e:
         logger.error(f"Error fetching BNB balance: {e}")
+        return 0.0
+
+async def get_onchain_bnb_balance(address: str) -> float:
+    """تشغيل الفحص في خيط منفصل لتفادي تجميد البوت"""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_fetch_bnb_sync, address), timeout=2.5)
+    except Exception:
         return 0.0
 
 def execute_testnet_transfer(to_address: str, amount_usdt: float):
@@ -240,7 +249,7 @@ class DatabaseManager:
                 logger.error(f"Supabase tx record err: {e}")
 
 # ==============================================================================
-# 5. UI
+# 5. UI Keyboards
 # ==============================================================================
 def is_admin_check(user_id: int) -> bool:
     return int(user_id) in ADMIN_IDS
@@ -283,7 +292,7 @@ def get_back_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="btn_main")]])
 
 # ==============================================================================
-# 6. Handlers (تمت معالجة الأزرار ببدائل آمنة تمنع التعليق)
+# 6. Handlers
 # ==============================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -294,7 +303,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not db_user:
         db_user = DatabaseManager.create_user(user_id, username)
 
-    bnb_bal = get_onchain_bnb_balance(db_user['wallet_address'])
+    bnb_bal = await get_onchain_bnb_balance(db_user['wallet_address'])
 
     msg = (
         f"🏠 <b>القائمة الرئيسية لحسابك:</b>\n\n"
@@ -349,7 +358,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
-    # استجابة سريعة للضغط لمنع أي تعليق على الواجهة
+    # 1. إجابة فورية للتلجرام لإغلاق مؤشر التحميل على الزر فورا
     try:
         await query.answer()
     except Exception as e:
@@ -366,7 +375,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = get_back_keyboard()
 
     if data == "btn_main":
-        bnb_bal = get_onchain_bnb_balance(user['wallet_address'])
+        bnb_bal = await get_onchain_bnb_balance(user['wallet_address'])
         msg = (
             f"🏠 <b>القائمة الرئيسية لحسابك:</b>\n\n"
             f"👤 معرف الحساب (ID): <code>{user_id}</code>\n"
@@ -378,7 +387,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = get_main_keyboard(user_id)
 
     elif data == "btn_wallet":
-        bnb_bal = get_onchain_bnb_balance(user['wallet_address'])
+        bnb_bal = await get_onchain_bnb_balance(user['wallet_address'])
         msg = (
             f"💳 <b>تفاصيل المحفظة:</b>\n\n"
             f"👤 {query.from_user.first_name}\n"
@@ -389,7 +398,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "btn_balance":
-        bnb_bal = get_onchain_bnb_balance(user['wallet_address'])
+        bnb_bal = await get_onchain_bnb_balance(user['wallet_address'])
         msg = (
             f"📊 <b>الرصيد:</b>\n\n"
             f"💵 USDT: <b>{user.get('balance', 0.0):.2f}</b>\n"
@@ -466,15 +475,15 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if msg:
         try:
-            # تجربة تعديل الرسالة القائمة مع HTML
             await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="HTML")
-        except Exception as e:
-            logger.warning(f"Failed to edit message, sending new one: {e}")
-            try:
-                # إذا فشل التعديل، يتم إرسال رسالة جديدة لتفادي تعليق الشاشة
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                pass # إعادة ضغط نفس الزر لا تسبب خطأ
+            else:
                 await query.message.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
-            except Exception as ex:
-                logger.error(f"Failed to send replacement message: {ex}")
+        except Exception as e:
+            logger.warning(f"Message edit fallback: {e}")
+            await query.message.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -528,7 +537,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
-    logger.info("Starting Telegram Bot with Web3 BNB & USDT Testnet...")
+    logger.info("Starting Telegram Bot with Async Safe Web3...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
