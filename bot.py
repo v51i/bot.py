@@ -1037,7 +1037,7 @@ def check_trade_against_context(signal_type, context, candle=None):
     h1_above_ema50 = context.get("h1_above_ema50", False)
     strength = candle.get("strength", 0) if candle else 0
     pattern = candle.get("pattern", "") if candle else ""
-    is_strong_reversal = strength >= 85 and "Kicker" in pattern  # فقط Kicker 85+ يعتبر انعكاس حقيقي
+    is_strong_reversal = strength >= 80 and "Kicker" in pattern  # فقط Kicker 85+ يعتبر انعكاس حقيقي
 
     if signal_type == "BUY":
         # لا تدخل BUY اذا M15 تحت EMA50 و EMA50 هابط - ترند هابط قوي
