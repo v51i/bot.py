@@ -11,15 +11,14 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, List, Tuple
 
-
 # ============================================================
 # KALARITH VIP GOLD - FULL ORIGINAL ANALYSIS + USER TRADING
-# NO SHORTENING - COMPLETE EDITION WITH ADMIN CHANNEL
+# COMPLETE - NO SHORTENING
 # ============================================================
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU")
-PRIVATE_CHAT_ID = os.environ.get("PRIVATE_CHAT_ID", "8952278702")
-CHANNEL_CHAT_ID = os.environ.get("CHANNEL_CHAT_ID", "@ZXPIF")
+TELEGRAM_TOKEN = "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU"
+PRIVATE_CHAT_ID = "8952278702"
+CHANNEL_CHAT_ID = "@ZXPIF"
 ADMIN_CHANNEL_ID = "@GXAIJ"
 ADMIN_IDS = [8952278702, 8950515154]
 
@@ -38,7 +37,6 @@ MAX_OPEN_TRADES_PER_USER = 3
 CONTRACT_SIZE = 100
 MARGIN_PER_LOT = 50.0
 
-# ==================== SIGNAL DB ====================
 def init_trades_db():
     try:
         conn = sqlite3.connect(TRADES_DB_FILE, check_same_thread=False)
@@ -175,8 +173,6 @@ def check_open_trades_price_loop(current_price):
         with trades_memory_lock:
             active_trades_memory[:] = [t for t in active_trades_memory if t["id"] not in to_remove]
 
-
-# ==================== USER TRADING ====================
 def init_user_trading_db():
     try:
         conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
@@ -411,8 +407,7 @@ def check_user_trades_price_loop(current_price):
                 except:
                     pass
 
-
-# ==================== SETTINGS ====================
+# ==================== SETTINGS (الأصلي كامل) ====================
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP1 = 0.4
 ATR_MULTIPLIER_TP2 = 1.0
@@ -551,8 +546,6 @@ last_bot_loop = datetime.now(SAUDI_TZ)
 last_market_report_hour = None
 last_data_update_time = None
 
-
-# ==================== HELPERS ====================
 def atomic_write_json(filepath, data):
     try:
         temp_file = filepath + ".tmp"
@@ -672,8 +665,6 @@ def update_bot_lock():
     except:
         pass
 
-
-# ==================== TELEGRAM ====================
 def send_to_telegram(message, event_id=None, parse_mode="HTML"):
     global sent_events
     if not TELEGRAM_TOKEN:
@@ -722,6 +713,8 @@ def send_to_admin_channel(message, reply_markup=None, parse_mode="HTML"):
         payload["reply_markup"] = reply_markup
     try:
         r = requests.post(url, json=payload, timeout=10)
+        if not r.ok:
+            print(f"[AdminChannel] Failed: {r.text}")
         return r.ok
     except Exception as e:
         print(f"[AdminChannel] Error: {e}")
@@ -735,8 +728,8 @@ def answer_callback(callback_id, text=None):
         payload["show_alert"] = True
     try:
         requests.post(url, json=payload, timeout=5)
-    except:
-        pass
+    except Exception as e:
+        print(f"[AnswerCallback] Error: {e}")
 
 def create_signal_id(signal_type, candle_time):
     raw = f"{signal_type}_{candle_time}".encode("utf-8")
@@ -773,8 +766,6 @@ def get_main_keyboard():
         "one_time_keyboard": False
     }
 
-
-# ==================== DATA + NEWS ====================
 def get_usd_high_impact_news():
     global news_cache, news_cache_time
     now = time.time()
@@ -911,8 +902,6 @@ def update_all_timeframes():
             tf_data[name] = data
             tf_data[name]["last_update"] = now
 
-
-# ==================== INDICATORS (الأصلي كامل) ====================
 def calculate_ema(values, period):
     if not values or len(values) < period:
         return [0.0] * len(values)
@@ -1378,8 +1367,6 @@ def should_skip_trade():
         return True
     return False
 
-
-# ==================== MARKET ALERTS + ANALYSIS (الأصلي) ====================
 def is_market_open(saudi_now=None):
     if saudi_now is None:
         saudi_now = datetime.now(SAUDI_TZ)
@@ -1696,7 +1683,6 @@ def analyze_market():
                     daily_b_grade += 1
                 save_active_trade()
 
-                # تداول آلي
                 try:
                     conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
                     cur = conn.cursor()
@@ -1721,8 +1707,9 @@ def analyze_market():
                 except Exception as e:
                     print(f"[AutoTrade] Loop error: {e}")
 
+# ==================== USER COMMANDS + CALLBACK + POLLING + MAIN ====================
+# (نفس الكود السابق كامل بدون اختصار - التداول + الأزرار + التشغيل)
 
-# ==================== USER COMMANDS ====================
 def handle_balance_command(chat_id, user_id):
     user = get_or_create_user(user_id)
     open_count = count_open_trades(user_id)
@@ -1764,7 +1751,7 @@ def handle_open_trade(chat_id, user_id, action):
         send_message_with_keyboard(chat_id, f"❌ {error}", get_main_keyboard())
         return
     msg = (
-        f"{'🟢' if action=='BUY' else '🔴'} <b>تم فتح صفقة {action}</b>\n\n"
+        f"{'🟢' if action == 'BUY' else '🔴'} <b>تم فتح صفقة {action}</b>\n\n"
         f"🆔 رقم الصفقة: <code>#{trade_id}</code>\n"
         f"📦 الحجم: <code>{DEFAULT_LOT}</code>\n"
         f"⚡ سعر الدخول: <code>{price:.2f}</code>\n"
@@ -1930,7 +1917,12 @@ def handle_deposit_proof(chat_id, user_id, proof_text):
         f"📌 الطريقة: {method_name}\n"
         f"📎 الإثبات:\n{proof_text}"
     )
-    keyboard = {"inline_keyboard": [[{"text": "✅ قبول", "callback_data": f"approve_dep_{dep_id}"}, {"text": "❌ رفض", "callback_data": f"reject_dep_{dep_id}"}]]}
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": "✅ قبول", "callback_data": f"approve_dep_{dep_id}"},
+            {"text": "❌ رفض", "callback_data": f"reject_dep_{dep_id}"}
+        ]]
+    }
     send_to_admin_channel(admin_msg, reply_markup=keyboard)
 
 def handle_withdraw_start(chat_id, user_id):
@@ -1984,7 +1976,12 @@ def handle_withdraw_address(chat_id, user_id, address):
         f"💰 المبلغ: <code>{amount}$</code>\n"
         f"📍 العنوان:\n<code>{address}</code>"
     )
-    keyboard = {"inline_keyboard": [[{"text": "✅ قبول", "callback_data": f"approve_wd_{wid}"}, {"text": "❌ رفض", "callback_data": f"reject_wd_{wid}"}]]}
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": "✅ قبول", "callback_data": f"approve_wd_{wid}"},
+            {"text": "❌ رفض", "callback_data": f"reject_wd_{wid}"}
+        ]]
+    }
     send_to_admin_channel(admin_msg, reply_markup=keyboard)
 
 def handle_admin_set_balance(admin_id, text, chat_id):
@@ -2022,25 +2019,30 @@ def handle_admin_add_method(admin_id, text, chat_id):
     except Exception as e:
         send_message_with_keyboard(chat_id, f"❌ {e}", get_main_keyboard())
 
-
-# ==================== CALLBACK ====================
 def handle_callback_query(callback):
     data = callback.get("data", "")
     callback_id = callback.get("id")
     from_user = callback.get("from", {})
     user_id = from_user.get("id")
+    print(f"[Callback] Received: data={data} | from={user_id}")
     if user_id not in ADMIN_IDS:
+        print(f"[Callback] Rejected - not admin: {user_id}")
         answer_callback(callback_id, "❌ هذا الزر للأدمن فقط")
         return
     try:
         if data.startswith("approve_dep_"):
             dep_id = int(data.replace("approve_dep_", ""))
+            print(f"[Callback] Approving deposit #{dep_id}")
             conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
             cur = conn.cursor()
             cur.execute("SELECT user_id, amount, status FROM deposits WHERE id=?", (dep_id,))
             row = cur.fetchone()
-            if not row or row[2] != "pending":
-                answer_callback(callback_id, "❌ الطلب غير موجود أو تمت معالجته")
+            if not row:
+                answer_callback(callback_id, "❌ الطلب غير موجود")
+                conn.close()
+                return
+            if row[2] != "pending":
+                answer_callback(callback_id, f"❌ تمت معالجته مسبقاً ({row[2]})")
                 conn.close()
                 return
             uid, amount, _ = row
@@ -2050,13 +2052,14 @@ def handle_callback_query(callback):
             conn.close()
             new_bal = add_to_balance(uid, amount)
             answer_callback(callback_id, f"✅ تم قبول الإيداع #{dep_id}")
-            send_to_admin_channel(f"✅ تم قبول الإيداع #{dep_id} | المبلغ {amount}$ | الرصيد الجديد {new_bal:.2f}$")
+            send_to_admin_channel(f"✅ تم قبول الإيداع #{dep_id}\nالمبلغ: {amount}$\nالرصيد الجديد: {new_bal:.2f}$")
             try:
-                send_message_with_keyboard(uid, f"✅ تم قبول إيداعك #{dep_id}\nتم إضافة {amount}$\nرصيدك: {new_bal:.2f}$", get_main_keyboard())
-            except:
-                pass
+                send_message_with_keyboard(uid, f"✅ تم قبول إيداعك #{dep_id}\nتم إضافة {amount}$\nرصيدك الآن: {new_bal:.2f}$", get_main_keyboard())
+            except Exception as e:
+                print(f"[Callback] Notify user error: {e}")
         elif data.startswith("reject_dep_"):
             dep_id = int(data.replace("reject_dep_", ""))
+            print(f"[Callback] Rejecting deposit #{dep_id}")
             conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
             cur = conn.cursor()
             cur.execute("SELECT user_id, status FROM deposits WHERE id=?", (dep_id,))
@@ -2078,6 +2081,7 @@ def handle_callback_query(callback):
                 pass
         elif data.startswith("approve_wd_"):
             wid = int(data.replace("approve_wd_", ""))
+            print(f"[Callback] Approving withdraw #{wid}")
             conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
             cur = conn.cursor()
             cur.execute("SELECT user_id, amount, status FROM withdrawals WHERE id=?", (wid,))
@@ -2098,13 +2102,14 @@ def handle_callback_query(callback):
             conn.close()
             new_bal = add_to_balance(uid, -amount)
             answer_callback(callback_id, f"✅ تم قبول السحب #{wid}")
-            send_to_admin_channel(f"✅ تم قبول السحب #{wid} | خصم {amount}$ | المتبقي {new_bal:.2f}$")
+            send_to_admin_channel(f"✅ تم قبول السحب #{wid}\nخصم: {amount}$\nالمتبقي: {new_bal:.2f}$")
             try:
                 send_message_with_keyboard(uid, f"✅ تم قبول السحب #{wid}\nتم خصم {amount}$\nرصيدك: {new_bal:.2f}$", get_main_keyboard())
             except:
                 pass
         elif data.startswith("reject_wd_"):
             wid = int(data.replace("reject_wd_", ""))
+            print(f"[Callback] Rejecting withdraw #{wid}")
             conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
             cur = conn.cursor()
             cur.execute("SELECT user_id, status FROM withdrawals WHERE id=?", (wid,))
@@ -2124,12 +2129,15 @@ def handle_callback_query(callback):
                 send_message_with_keyboard(uid, f"❌ تم رفض طلب السحب #{wid}", get_main_keyboard())
             except:
                 pass
+        else:
+            print(f"[Callback] Unknown data: {data}")
+            answer_callback(callback_id, "أمر غير معروف")
     except Exception as e:
-        print(f"[Callback] Error: {e}")
-        answer_callback(callback_id, "حدث خطأ")
+        print(f"[Callback] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        answer_callback(callback_id, f"حدث خطأ: {str(e)[:40]}")
 
-
-# ==================== POLLING ====================
 def telegram_polling_loop():
     print("[Telegram Polling] Started")
     offset = 0
@@ -2234,8 +2242,6 @@ def telegram_polling_loop():
             print(f"[Polling] Error: {e}")
             time.sleep(3)
 
-
-# ==================== MAIN ====================
 def send_startup_report():
     price = get_biquote_price()
     price_text = f"{price:.3f}" if price is not None else "غير متوفر"
@@ -2290,15 +2296,11 @@ def trading_bot_loop():
             last_bot_loop = datetime.now(SAUDI_TZ)
             now = datetime.now(SAUDI_TZ)
             update_bot_lock()
-            if now.date() != last_summary_date:
-                pass
             check_market_state(now)
             now_ny = now.astimezone(NY_TZ)
             if now_ny.weekday() == 6 and now_ny.hour == 17 and 25 <= now_ny.minute < 55 and not pre_market_sent:
                 send_pre_market_report(now)
                 pre_market_sent = True
-            if now.minute <= 3:
-                pass
             if now.minute % 5 == 0 and now.second < 3:
                 send_news_report(get_usd_high_impact_news(), now)
             update_all_timeframes()
@@ -2318,6 +2320,11 @@ def trading_bot_loop():
 
 def start_application():
     print("KALARITH VIP GOLD - FULL ORIGINAL ANALYSIS + USER TRADING + ADMIN CHANNEL")
+    try:
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=10)
+        print("[Webhook] Deleted successfully")
+    except Exception as e:
+        print(f"[Webhook] Delete error: {e}")
     if not acquire_bot_lock():
         return
     init_trades_db()
