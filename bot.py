@@ -21,7 +21,6 @@ PRIVATE_CHAT_ID = "8952278702"
 CHANNEL_CHAT_ID = "@ZXPIF"
 ADMIN_BOT_TOKEN = "8213676342:AAHPZgXdUufiz7b8zEJ5s2-ZdoXVFBAPx2M"
 ADMIN_IDS = [8952278702, 8950515154]
-ADMIN_CHANNEL_ID = PRIVATE_CHAT_ID  # القناة أو الشات لإشعارات الأدمن
 
 BIQUOTE_BASE_URL = "https://biquote.io/api"
 BIQUOTE_SYMBOL = "XAUUSD"
@@ -404,7 +403,7 @@ def check_user_trades_price_loop(current_price):
                 except:
                     pass
                 try:
-                    send_to_admin_channel(f"🔔 <b>إغلاق صفقة عميل</b>\n\n{msg}\n👤 ID: <code>{uid}</code>")
+                    send_admin_bot_message(f"🔔 <b>إغلاق صفقة عميل</b>\n\n{msg}\n👤 ID: <code>{uid}</code>")
                 except:
                     pass
 
@@ -700,26 +699,32 @@ def send_to_telegram(message, event_id=None, parse_mode="HTML"):
         return True
     return success_count > 0
 
+def send_admin_bot_message(message, reply_markup=None, parse_mode="HTML"):
+    if not ADMIN_BOT_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/sendMessage"
+    success = True
+    for admin_id in ADMIN_IDS:
+        payload = {
+            "chat_id": admin_id,
+            "text": message,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        try:
+            r = requests.post(url, json=payload, timeout=10)
+            if not r.ok:
+                print(f"[AdminBot] Failed for {admin_id}: {r.text}")
+                success = False
+        except Exception as e:
+            print(f"[AdminBot] Error for {admin_id}: {e}")
+            success = False
+    return success
+
 def send_to_admin_channel(message, reply_markup=None, parse_mode="HTML"):
-    if not TELEGRAM_TOKEN or not ADMIN_CHANNEL_ID:
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": ADMIN_CHANNEL_ID,
-        "text": message,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        if not r.ok:
-            print(f"[AdminChannel] Failed: {r.text}")
-        return r.ok
-    except Exception as e:
-        print(f"[AdminChannel] Error: {e}")
-        return False
+    return send_admin_bot_message(message, reply_markup, parse_mode)
 
 def answer_callback(callback_id, text=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
@@ -1698,7 +1703,7 @@ def analyze_market():
                                     send_message_with_keyboard(uid,
                                         f"🤖 <b>تداول آلي</b>\n\nتم فتح صفقة {wave['signal']} تلقائيًا\n🆔 <code>#{trade_id}</code>\n⚡ الدخول: <code>{price}</code>\n🛑 SL: <code>{risk['sl']}</code>\n🎯 TP: <code>{risk['tp2']}</code>",
                                         get_main_keyboard())
-                                    send_to_admin_channel(
+                                    send_admin_bot_message(
                                         f"🤖 <b>فتح صفقة عميل (آلي)</b>\n\n👤 ID: <code>{uid}</code>\n🆔 الصفقة: <code>#{trade_id}</code>\n📊 النوع: <code>{wave['signal']}</code>\n⚡ الدخول: <code>{price}</code>\n🛑 SL: <code>{risk['sl']}</code>\n🎯 TP: <code>{risk['tp2']}</code>"
                                     )
                                 except:
@@ -1762,7 +1767,7 @@ def handle_open_trade(chat_id, user_id, action):
     send_message_with_keyboard(chat_id, msg, get_main_keyboard())
     try:
         user = get_or_create_user(user_id)
-        send_to_admin_channel(
+        send_admin_bot_message(
             f"📈 <b>فتح صفقة عميل (يدوي)</b>\n\n"
             f"👤 {user['name']} (<code>{user_id}</code>)\n"
             f"🆔 الصفقة: <code>#{trade_id}</code>\n"
@@ -1819,328 +1824,253 @@ def handle_price_command(chat_id):
     msg = (
         f"📊 <b>سعر XAUUSD</b>\n\n"
         f"💰 السعر: <code>{price_text}</code>\n"
-        f"🧠 H1: {context.get('h1_bias')} | M15: {context.get('m15_bias')} | M5: {context.get('m5_bias')}\n"
-        f"📅 {datetime.now(SAUDI_TZ).strftime('%Y-%m-%d %H:%M:%S')}"
+        f"🧠 H1: {context.get('h1_bias')} | M15: {context.get('m15_bias')} | M5: {context.get('m5_bias')}"
     )
     send_message_with_keyboard(chat_id, msg, get_main_keyboard())
 
-def handle_news_command(chat_id):
-    news = get_usd_high_impact_news()
-    if not news:
-        msg = "📰 لا توجد أخبار عالية التأثير حالياً اليوم."
-    else:
-        msg = "📰 <b>أخبار USD عالية التأثير اليوم</b>\n\n"
-        for item in news:
-            time_str = item["time"].strftime("%H:%M")
-            msg += f"🔴 <b>{item['title']}</b>\n⏰ Time: {time_str}\n📊 Forecast: {item['forecast']} | Prev: {item['previous']}\n\n"
-    send_message_with_keyboard(chat_id, msg, get_main_keyboard())
-
-def handle_auto_trade_toggle(chat_id, user_id):
-    current = get_auto_trade(user_id)
-    new_status = 1 if current == 0 else 0
-    set_auto_trade(user_id, new_status)
-    status_text = "🟢 تم تفعيل التداول الآلي بنجاح!" if new_status == 1 else "🔴 تم إيقاف التداول الآلي."
-    send_message_with_keyboard(chat_id, status_text, get_main_keyboard())
-
-def handle_deposit_request(chat_id, user_id):
+def handle_deposit_command(chat_id, user_id):
     conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
     cur = conn.cursor()
     cur.execute("SELECT id, name, details FROM deposit_methods WHERE is_active=1")
     methods = cur.fetchall()
     conn.close()
-    
     if not methods:
-        msg = (
-            "📥 <b>طلب إيداع</b>\n\n"
-            "يرجى التحويل إلى المحفظة التالية (USDT TRC20):\n"
-            "<code>TYourWalletAddressHere1234567890</code>\n\n"
-            "بعد التحويل، يرجى إرسال المبلغ واسمك عبر زر الدعم أو للتواصل مع الإدارة."
-        )
-    else:
-        msg = "📥 <b>طرق الإيداع المتاحة:</b>\n\n"
-        for m in methods:
-            msg += f"🔹 <b>{m[1]}</b>:\n<code>{m[2]}</code>\n\n"
-        msg += "يرجى التحويل ثم إرسال صورة الإيصال للإدارة مع ID حسابك."
-    
+        send_message_with_keyboard(chat_id, "📥 <b>قسم الإيداع</b>\n\nيرجى التواصل مع الدعم للإيداع حالياً.", get_main_keyboard())
+        return
+    msg = "📥 <b>وسائل الإيداع المتاحة:</b>\n\n"
+    for m in methods:
+        msg += f"🔹 <b>{m[1]}</b>\n<code>{m[2]}</code>\n\n"
+    msg += "لتقديم طلب إيداع، اكتب المبلغ وارفق إثبات التحويل بالطريقة المفضلة، أو تواصل مع الإدارة."
     send_message_with_keyboard(chat_id, msg, get_main_keyboard())
 
-def handle_withdrawal_request(chat_id, user_id, text_parts):
+def handle_withdrawal_command(chat_id, user_id):
     user = get_or_create_user(user_id)
-    if len(text_parts) < 3:
-        msg = (
-            "📤 <b>طلب سحب رصيد</b>\n\n"
-            f"💵 رصيدك الحالي: <code>{user['balance']:.2f}$</code>\n\n"
-            "لإرسال طلب سحب، اكتب الأمر بالصيغة التالية:\n"
-            "<code>سحب [المبلغ] [عنوان_المحفظة]</code>\n"
-            "مثال:\n<code>سحب 50 TYourUSDTAddress...</code>"
-        )
-        send_message_with_keyboard(chat_id, msg, get_main_keyboard())
+    if user["balance"] <= 0:
+        send_message_with_keyboard(chat_id, "❌ رصيدك الحالي 0.0$، لا يمكنك السحب.", get_main_keyboard())
         return
-
-    try:
-        amount = float(text_parts[1])
-        address = text_parts[2]
-    except ValueError:
-        send_message_with_keyboard(chat_id, "❌ خطأ في تحديد المبلغ. يرجى إدخال رقم صحيح.", get_main_keyboard())
-        return
-
-    if amount <= 0:
-        send_message_with_keyboard(chat_id, "❌ المبلغ يجب أن يكون أكبر من 0.", get_main_keyboard())
-        return
-
-    if user["balance"] < amount:
-        send_message_with_keyboard(chat_id, f"❌ رصيدك غير كافٍ. رصيدك الحالي: {user['balance']:.2f}$", get_main_keyboard())
-        return
-
-    # تخصيم الرصيد مؤقتاً أو تسجيل الطلب
-    now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO withdrawals (user_id, amount, address, status, created_at)
-        VALUES (?, ?, ?, 'pending', ?)
-    """, (str(user_id), amount, address, now))
-    wid = cur.lastrowid
-    conn.commit()
-    conn.close()
-
-    send_message_with_keyboard(chat_id, f"✅ تم تقديم طلب السحب رقم #{wid} بمبلغ {amount}$ بنجاح. قيد المراجعة من الإدارة.", get_main_keyboard())
-    
-    send_to_admin_channel(
-        f"📤 <b>طلب سحب جديد #{wid}</b>\n\n"
-        f"👤 العميل: {user['name']} (<code>{user_id}</code>)\n"
-        f"💰 المبلغ: <code>{amount:.2f}$</code>\n"
-        f"🏦 المحفظة: <code>{address}</code>\n"
-        f"📅 الوقت: <code>{now}</code>"
+    with user_states_lock:
+        user_states[str(user_id)] = {"state": "AWAITING_WITHDRAWAL_AMOUNT"}
+    msg = (
+        f"📤 <b>طلب سحب جديد</b>\n\n"
+        f"💵 رصيدك المتاح: <code>{user['balance']:.2f}$</code>\n\n"
+        f"الرجاء كتابة **المبلغ** الذي ترغب بسحبه الآن (أو ارسل 0 للإلغاء):"
     )
+    send_message_with_keyboard(chat_id, msg, {"keyboard": [["0 - إلغاء"]], "resize_keyboard": True})
 
-def handle_admin_commands(chat_id, user_id, text):
-    if user_id not in ADMIN_IDS:
+def handle_auto_trade_toggle(chat_id, user_id):
+    current = get_auto_trade(user_id)
+    new_state = 0 if current == 1 else 1
+    set_auto_trade(user_id, new_state)
+    status_text = "🟢 تم تفعيل التداول الآلي بنجاح!" if new_state == 1 else "🔴 تم إيقاف التداول الآلي."
+    send_message_with_keyboard(chat_id, f"🤖 <b>التداول الآلي</b>\n\n{status_text}", get_main_keyboard())
+
+def process_user_text_input(chat_id, user_id, text):
+    uid = str(user_id)
+    with user_states_lock:
+        state_info = user_states.get(uid)
+    if not state_info:
         return False
 
-    parts = text.split()
-    cmd = parts[0].lower()
+    state = state_info.get("state")
 
-    if cmd == "/admin" or cmd == "ادمن":
-        msg = (
-            "⚙️ <b>لوحة تحكم الأدمن</b>\n\n"
-            "• <code>/addbalance [user_id] [amount]</code> - إضافة رصيد لمستخدم\n"
-            "• <code>/setbalance [user_id] [amount]</code> - تعيين رصيد مستخدم\n"
-            "• <code>/users</code> - عرض قائمة المستخدمين\n"
-            "• <code>/stats</code> - إحصائيات النظام الشاملة"
-        )
-        send_message_with_keyboard(chat_id, msg, get_main_keyboard())
-        return True
+    if state == "AWAITING_WITHDRAWAL_AMOUNT":
+        if text.strip().startswith("0"):
+            with user_states_lock:
+                user_states.pop(uid, None)
+            send_message_with_keyboard(chat_id, "❌ تم إلغاء طلب السحب.", get_main_keyboard())
+            return True
+        try:
+            amount = float(text.strip())
+            user = get_or_create_user(user_id)
+            if amount <= 0 or amount > user["balance"]:
+                send_message_with_keyboard(chat_id, f"❌ مبلغ غير صالح. رصيدك المتاح: {user['balance']:.2f}$", get_main_keyboard())
+                return True
+            with user_states_lock:
+                user_states[uid] = {"state": "AWAITING_WITHDRAWAL_ADDRESS", "amount": amount}
+            send_message_with_keyboard(chat_id, f"✅ المبلغ: {amount:.2f}$\n\nالان ارسل **عنوان المحفظة** أو الحساب المالي لاستلام المبلغ:", {"keyboard": [["0 - إلغاء"]], "resize_keyboard": True})
+            return True
+        except ValueError:
+            send_message_with_keyboard(chat_id, "❌ الرجاء إدخال رقم صحيح للمبلغ.", get_main_keyboard())
+            return True
 
-    elif cmd == "/addbalance" and len(parts) >= 3:
-        target_uid = parts[1]
-        amount = float(parts[2])
-        new_bal = add_to_balance(target_uid, amount)
-        send_message_with_keyboard(chat_id, f"✅ تم إضافة {amount}$ للمستخدم {target_uid}. الرصيد الجديد: {new_bal:.2f}$", get_main_keyboard())
-        send_message_with_keyboard(target_uid, f"🎉 تم إيداع {amount}$ في حسابك! رصيدك الحالي: {new_bal:.2f}$", get_main_keyboard())
-        return True
-
-    elif cmd == "/setbalance" and len(parts) >= 3:
-        target_uid = parts[1]
-        amount = float(parts[2])
-        update_user_balance(target_uid, amount)
-        send_message_with_keyboard(chat_id, f"✅ تم تعيين رصيد المستخدم {target_uid} إلى {amount:.2f}$", get_main_keyboard())
-        send_message_with_keyboard(target_uid, f"ℹ️ تم تحديث رصيدك إلى {amount:.2f}$ بواسطة الإدارة.", get_main_keyboard())
-        return True
-
-    elif cmd == "/users":
+    elif state == "AWAITING_WITHDRAWAL_ADDRESS":
+        if text.strip().startswith("0"):
+            with user_states_lock:
+                user_states.pop(uid, None)
+            send_message_with_keyboard(chat_id, "❌ تم إلغاء طلب السحب.", get_main_keyboard())
+            return True
+        address = text.strip()
+        amount = state_info.get("amount", 0.0)
+        with user_states_lock:
+            user_states.pop(uid, None)
         conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
         cur = conn.cursor()
-        cur.execute("SELECT user_id, name, balance, auto_trade FROM users LIMIT 20")
-        rows = cur.fetchall()
+        now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("INSERT INTO withdrawals (user_id, amount, address, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+                    (uid, amount, address, now))
+        wid = cur.lastrowid
+        conn.commit()
         conn.close()
-        msg = "👤 <b>المستخدمون (آخر 20):</b>\n\n"
-        for r in rows:
-            auto = "🤖" if r[3] == 1 else ""
-            msg += f"• {r[1]} (<code>{r[0]}</code>): <b>{r[2]:+.2f}$</b> {auto}\n"
-        send_message_with_keyboard(chat_id, msg, get_main_keyboard())
-        return True
-
-    elif cmd == "/stats":
-        msg = (
-            f"📊 <b>إحصائيات اليوم:</b>\n"
-            f"• الإشارات: {daily_signals}\n"
-            f"• الصفقات المكتملة: {daily_completed_trades}\n"
-            f"• الأرباح: {daily_wins} ✅ | الخسائر: {daily_losses} ❌\n"
-            f"• مجموع النقاط: {daily_total_profit:.2f}\n"
+        send_message_with_keyboard(chat_id, f"✅ <b>تم تقديم طلب السحب بنجاح!</b>\n\n🆔 رقم الطلب: <code>#{wid}</code>\n💵 المبلغ: <code>{amount:.2f}$</code>\n📍 العنوان: <code>{address}</code>\n⏳ الطلب قيد المراجعة من الإدارة.", get_main_keyboard())
+        
+        user = get_or_create_user(user_id)
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ موافقة", "callback_data": f"approve_withdrawal_{wid}"},
+                    {"text": "❌ رفض", "callback_data": f"reject_withdrawal_{wid}"}
+                ]
+            ]
+        }
+        send_admin_bot_message(
+            f"📤 <b>طلب سحب جديد #{wid}</b>\n\n"
+            f"👤 العميل: {user['name']} (<code>{uid}</code>)\n"
+            f"💵 المبلغ: <code>{amount:.2f}$</code>\n"
+            f"📍 العنوان: <code>{address}</code>",
+            reply_markup=reply_markup
         )
-        send_message_with_keyboard(chat_id, msg, get_main_keyboard())
         return True
 
     return False
 
-def process_telegram_update(update):
-    try:
-        if "message" in update:
-            msg = update["message"]
-            chat_id = msg["chat"]["id"]
-            user_id = msg["from"]["id"]
-            text = msg.get("text", "").strip()
-            first_name = msg["from"].get("first_name", "مستخدم")
-
-            get_or_create_user(user_id, first_name)
-
-            if handle_admin_commands(chat_id, user_id, text):
-                return
-
-            parts = text.split()
-            if text == "/start" or text == "🔙 رجوع":
-                welcome = (
-                    f"أهلاً بك يا <b>{first_name}</b> في بوت <b>KALARITH VIP GOLD</b> 🚀\n\n"
-                    f"منصة التداول الآلي واليدوي الأولى للذهب (XAUUSD).\n"
-                    f"اختر من القائمة أدناه للبدء:"
-                )
-                send_message_with_keyboard(chat_id, welcome, get_main_keyboard())
-            elif text == "💰 رصيدي":
-                handle_balance_command(chat_id, user_id)
-            elif text == "📈 تداول":
-                handle_trade_menu(chat_id, user_id)
-            elif text == "🟢 شراء BUY":
-                handle_open_trade(chat_id, user_id, "BUY")
-            elif text == "🔴 بيع SELL":
-                handle_open_trade(chat_id, user_id, "SELL")
-            elif text == "🤖 تداول آلي":
-                handle_auto_trade_toggle(chat_id, user_id)
-            elif text == "📊 صفقاتي المفتوحة":
-                handle_my_open_trades(chat_id, user_id)
-            elif text == "📜 سجل صفقاتي":
-                handle_my_trade_history(chat_id, user_id)
-            elif text == "📊 سعر XAUUSD":
-                handle_price_command(chat_id)
-            elif text == "📰 أخبار السوق":
-                handle_news_command(chat_id)
-            elif text == "🆔 ايدي":
-                send_message_with_keyboard(chat_id, f"🆔 معرفك الخاص (ID): <code>{user_id}</code>", get_main_keyboard())
-            elif text == "📥 إيداع":
-                handle_deposit_request(chat_id, user_id)
-            elif text == "📤 سحب" or parts[0] == "سحب":
-                handle_withdrawal_request(chat_id, user_id, parts)
-            elif text.startswith("❌ إغلاق #"):
-                try:
-                    tid = int(text.replace("❌ إغلاق #", "").strip())
-                    success, profit = close_user_trade_manual(tid, user_id)
-                    if success:
-                        send_message_with_keyboard(chat_id, f"✅ تم إغلاق الصفقة #{tid} بنجاح.\nالنتيجة: <code>{profit:+.2f}$</code>", get_main_keyboard())
-                    else:
-                        send_message_with_keyboard(chat_id, f"❌ فشل إغلاق الصفقة: {profit}", get_main_keyboard())
-                except Exception as e:
-                    send_message_with_keyboard(chat_id, f"❌ حدث خطأ أثناء الإغلاق: {e}", get_main_keyboard())
-
-        elif "callback_query" in update:
-            cb = update["callback_query"]
-            cb_id = cb["id"]
-            user_id = cb["from"]["id"]
-            data = cb.get("data", "")
-            answer_callback(cb_id)
-    except Exception as e:
-        print(f"[UpdateError] {e}")
-
-def telegram_polling_loop():
-    offset = 0
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-    print("[Telegram] Long polling started...")
-    while True:
-        try:
-            r = requests.get(url, params={"offset": offset, "timeout": 20}, timeout=25)
-            if r.status_code == 200:
-                data = r.json()
-                if data.get("ok"):
-                    for update in data.get("result", []):
-                        offset = update["update_id"] + 1
-                        threading.Thread(target=process_telegram_update, args=(update,), daemon=True).start()
-        except Exception as e:
-            time.sleep(2)
-        time.sleep(0.2)
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "application/json; charset=utf-8")
-        self.end_headers()
-        res = {
-            "status": "online",
-            "bot": "KALARITH VIP GOLD",
-            "uptime_seconds": int((datetime.now(SAUDI_TZ) - server_started_at).total_seconds()),
-            "active_trade": active_trade,
-            "daily_signals": daily_signals,
-            "daily_profit": round(daily_total_profit, 2)
-        }
-        self.wfile.write(json.dumps(res, ensure_ascii=False).encode("utf-8"))
-
-    def log_message(self, format, *args):
+def handle_user_message(message):
+    chat_id = message.get("chat", {}).get("id")
+    user = message.get("from", {})
+    user_id = user.get("id")
+    text = message.get("text", "")
+    if not chat_id or not user_id:
         return
 
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    print(f"[HealthServer] Running on port {port}")
-    server.serve_forever()
+    get_or_create_user(user_id, user.get("first_name", "مستخدم"))
 
-def main_loop():
-    global last_bot_loop, last_summary_date, daily_signals, daily_completed_trades
-    global daily_wins, daily_losses, daily_tp1_hits, daily_tp2_hits, daily_sl_hits
-    global daily_be_hits, daily_timeout, daily_a_grade, daily_b_grade, daily_reversals
-    global daily_news_blocked, daily_total_profit, daily_loss_total
+    if process_user_text_input(chat_id, user_id, text):
+        return
 
-    print("[MainLoop] Starting core analysis engine...")
+    if text in ["/start", "🔙 رجوع"]:
+        send_message_with_keyboard(chat_id, "مرحباً بك في بوت KALARITH VIP GOLD التفاعلي 🔱\nاختر من القائمة أسفله:", get_main_keyboard())
+    elif text == "💰 رصيدي":
+        handle_balance_command(chat_id, user_id)
+    elif text == "📈 تداول":
+        handle_trade_menu(chat_id, user_id)
+    elif text == "🟢 شراء BUY":
+        handle_open_trade(chat_id, user_id, "BUY")
+    elif text == "🔴 بيع SELL":
+        handle_open_trade(chat_id, user_id, "SELL")
+    elif text == "📊 صفقاتي المفتوحة":
+        handle_my_open_trades(chat_id, user_id)
+    elif text == "📜 سجل صفقاتي":
+        handle_my_trade_history(chat_id, user_id)
+    elif text == "📊 سعر XAUUSD":
+        handle_price_command(chat_id)
+    elif text == "🤖 تداول آلي":
+        handle_auto_trade_toggle(chat_id, user_id)
+    elif text == "📥 إيداع":
+        handle_deposit_command(chat_id, user_id)
+    elif text == "📤 سحب":
+        handle_withdrawal_command(chat_id, user_id)
+    elif text == "🆔 ايدي":
+        send_message_with_keyboard(chat_id, f"🆔 ايديك الخاص: <code>{user_id}</code>", get_main_keyboard())
+    elif text == "📰 أخبار السوق":
+        news = get_usd_high_impact_news()
+        if news:
+            msg = "📰 <b>أهم الأخبار الاقتصادية المرتقبة (USD):</b>\n\n"
+            for n in news[:5]:
+                msg += f"🔹 <b>{n['title']}</b>\n⏰ {n['time'].strftime('%Y-%m-%d %H:%M')}\nالمتوقع: {n['forecast']} | السابق: {n['previous']}\n\n"
+            send_message_with_keyboard(chat_id, msg, get_main_keyboard())
+        else:
+            send_message_with_keyboard(chat_id, "لا توجد أخبار عالية التأثير قادمة حالياً.", get_main_keyboard())
+    elif text.startswith("❌ إغلاق #"):
+        try:
+            tid = int(text.replace("❌ إغلاق #", "").strip())
+            success, profit = close_user_trade_manual(tid, user_id)
+            if success:
+                send_message_with_keyboard(chat_id, f"✅ تم إغلاق الصفقة #{tid} بنجاح.\nالربح/الخسارة: {profit:+.2f}$", get_main_keyboard())
+            else:
+                send_message_with_keyboard(chat_id, f"❌ فشل إغلاق الصفقة: {profit}", get_main_keyboard())
+        except:
+            send_message_with_keyboard(chat_id, "❌ رقم صفقة غير صالح.", get_main_keyboard())
+
+def process_admin_bot_callback(callback_query):
+    cq_id = callback_query.get("id")
+    data = callback_query.get("data", "")
+    from_user = callback_query.get("from", {}).get("id")
+
+    if from_user not in ADMIN_IDS:
+        answer_callback(cq_id, "غير مسموح لك بتنفيذ هذا الإجراء")
+        return
+
+    if data.startswith("approve_withdrawal_") or data.startswith("reject_withdrawal_"):
+        is_approve = data.startswith("approve_withdrawal_")
+        wid = data.replace("approve_withdrawal_", "").replace("reject_withdrawal_", "")
+        
+        conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, amount, status FROM withdrawals WHERE id=?", (wid,))
+        row = cur.fetchone()
+        
+        if not row or row[2] != "pending":
+            conn.close()
+            answer_callback(cq_id, "الطلب غير موجود أو تم معالجته مسبقاً")
+            return
+            
+        uid, amount, _ = row
+        now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        
+        if is_approve:
+            user = get_or_create_user(uid)
+            if user["balance"] < amount:
+                conn.close()
+                answer_callback(cq_id, "رصيد العميل غير كافي حالياً للسحب!")
+                return
+            update_user_balance(uid, user["balance"] - amount)
+            cur.execute("UPDATE withdrawals SET status='approved', processed_at=? WHERE id=?", (now, wid))
+            conn.commit()
+            conn.close()
+            
+            send_message_with_keyboard(uid, f"✅ <b>تمت الموافقة على طلب السحب #{wid}</b>\n\n💵 المبلغ: <code>{amount:.2f}$</code>\nتم خصم المبلغ وتحويله لحسابك.", get_main_keyboard())
+            answer_callback(cq_id, "تمت الموافقة وخصم المبلغ من حساب العميل")
+        else:
+            cur.execute("UPDATE withdrawals SET status='rejected', processed_at=? WHERE id=?", (now, wid))
+            conn.commit()
+            conn.close()
+            
+            send_message_with_keyboard(uid, f"❌ <b>تم رفض طلب السحب #{wid}</b>\n\n💵 المبلغ: <code>{amount:.2f}$</code>\nيرجى التواصل مع الدعم لمعرفة السبب.", get_main_keyboard())
+            answer_callback(cq_id, "تم رفض طلب السحب")
+
+def poll_telegram_updates():
+    offset = 0
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
     while True:
         try:
-            now = datetime.now(SAUDI_TZ)
-            last_bot_loop = now
-            update_bot_lock()
-
-            # إعادة تعيين الإحصائيات اليومية عند بداية يوم جديد
-            if now.date() != last_summary_date:
-                daily_signals = 0
-                daily_completed_trades = 0
-                daily_wins = 0
-                daily_losses = 0
-                daily_tp1_hits = 0
-                daily_tp2_hits = 0
-                daily_sl_hits = 0
-                daily_be_hits = 0
-                daily_timeout = 0
-                daily_a_grade = 0
-                daily_b_grade = 0
-                daily_reversals = 0
-                daily_news_blocked = 0
-                daily_total_profit = 0.0
-                daily_loss_total = 0.0
-                last_summary_date = now.date()
-                print(f"[MainLoop] Daily counters reset for {last_summary_date}")
-
-            check_market_state(now)
-
-            if is_market_open(now):
-                update_all_timeframes()
-                current_price = get_biquote_price()
-                
-                # فحص الصفقات المفتوحة للنظام والعملاء
-                check_open_trades_price_loop(current_price)
-                check_user_trades_price_loop(current_price)
-
-                # تحليل السوق لتوليد الإشارات والتداول الآلي
-                analyze_market()
-
-                # متابعة وتقارير الأخبار
-                news = get_usd_high_impact_news()
-                if news:
-                    send_news_report(news, now)
-
+            r = requests.get(url, params={"offset": offset, "timeout": 10}, timeout=15)
+            if r.status_code == 200:
+                updates = r.json().get("result", [])
+                for u in updates:
+                    offset = u["update_id"] + 1
+                    if "message" in u:
+                        handle_user_message(u["message"])
         except Exception as e:
-            print(f"[MainLoop Error] {e}")
-
+            print(f"[Polling Error] {e}")
         time.sleep(1)
 
-if __name__ == "__main__":
-    if not acquire_bot_lock():
-        exit(1)
+def poll_admin_bot_updates():
+    offset = 0
+    url = f"https://api.telegram.org/bot{ADMIN_BOT_TOKEN}/getUpdates"
+    while True:
+        try:
+            r = requests.get(url, params={"offset": offset, "timeout": 10}, timeout=15)
+            if r.status_code == 200:
+                updates = r.json().get("result", [])
+                for u in updates:
+                    offset = u["update_id"] + 1
+                    if "callback_query" in u:
+                        process_admin_bot_callback(u["callback_query"])
+        except Exception as e:
+            print(f"[AdminBot Polling Error] {e}")
+        time.sleep(1)
 
+def main_loop():
+    print("Starting KALARITH VIP GOLD Trading Engine...")
     init_trades_db()
     init_user_trading_db()
     load_sent_events()
@@ -2148,7 +2078,30 @@ if __name__ == "__main__":
     load_active_trade()
     load_open_trades_to_memory()
 
-    threading.Thread(target=run_health_server, daemon=True).start()
-    threading.Thread(target=telegram_polling_loop, daemon=True).start()
+    if not acquire_bot_lock():
+        return
 
+    threading.Thread(target=poll_telegram_updates, daemon=True).start()
+    threading.Thread(target=poll_admin_bot_updates, daemon=True).start()
+
+    while True:
+        try:
+            update_bot_lock()
+            saudi_now = datetime.now(SAUDI_TZ)
+            check_market_state(saudi_now)
+
+            if is_market_open(saudi_now):
+                update_all_timeframes()
+                current_price = get_biquote_price()
+                if current_price:
+                    check_open_trades_price_loop(current_price)
+                    check_user_trades_price_loop(current_price)
+                analyze_market()
+
+            time.sleep(2)
+        except Exception as e:
+            print(f"[MainLoop Error] {e}")
+            time.sleep(5)
+
+if __name__ == "__main__":
     main_loop()
