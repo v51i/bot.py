@@ -16,7 +16,7 @@ from typing import Optional, Dict, List, Tuple
 # KALARITH VIP GOLD - FULL + AUTO TRADE + MANUAL CLOSE
 # ============================================================
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "ضع_التوكن_الجديد_هنا")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU")
 PRIVATE_CHAT_ID = os.environ.get("PRIVATE_CHAT_ID", "8952278702")
 CHANNEL_CHAT_ID = os.environ.get("CHANNEL_CHAT_ID", "@ZXPIF")
 ADMIN_IDS = [8952278702, 8950515154]
