@@ -13,19 +13,19 @@ from typing import Optional, Dict, List, Tuple
 
 
 # ============================================================
-# KALARITH VIP GOLD - FULL EDITION - FIXED NO COMPRESSION
-# Smart M5 Exit | Overextension Dynamic 70/20 & 36/40 | Sweep 20 | SR 100 | Max SL 16
-# Candle Strength 60 (was 73) | 16 Patterns + EMA20 Pullback
+# KALARITH VIP GOLD - FULL EDITION + USER TRADING SYSTEM
+# Paper Trading + Real Deposit/Withdraw + Signals
 # ============================================================
 
 
 # ============================================================
-# SECRETS
+# SECRETS - غيّر التوكن فورًا
 # ============================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8736561405:AAH5sZhHy6WgmKK7KkAn-8SL6Mr_4Dd7rxU")
 PRIVATE_CHAT_ID = os.environ.get("PRIVATE_CHAT_ID", "8952278702")
 CHANNEL_CHAT_ID = os.environ.get("CHANNEL_CHAT_ID", "@ZXPIF")
+ADMIN_IDS = [8952278702, 8950515154]
 
 
 # ============================================================
@@ -35,9 +35,11 @@ CHANNEL_CHAT_ID = os.environ.get("CHANNEL_CHAT_ID", "@ZXPIF")
 BIQUOTE_BASE_URL = "https://biquote.io/api"
 BIQUOTE_SYMBOL = "XAUUSD"
 
+
 # ============================================================
-# SQLITE TRADES DATABASE
+# SQLITE TRADES DATABASE (إشارات البوت)
 # ============================================================
+
 TRADES_DB_FILE = "trades.db"
 active_trades_memory = []
 trades_memory_lock = threading.Lock()
@@ -197,13 +199,228 @@ def check_open_trades_price_loop(current_price):
             active_trades_memory[:] = [t for t in active_trades_memory if t["id"] not in to_remove]
 
 
+# ============================================================
+# USER TRADING SYSTEM + DEPOSITS + WITHDRAWALS
+# ============================================================
+
+USER_DB_FILE = "user_trading.db"
+user_states = {}
+user_states_lock = threading.Lock()
+
+DEFAULT_LOT = 0.01
+MAX_OPEN_TRADES_PER_USER = 3
+CONTRACT_SIZE = 100
+MARGIN_PER_LOT = 50.0
+
+def init_user_trading_db():
+    try:
+        conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                name TEXT,
+                balance REAL DEFAULT 0.0,
+                created_at TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS deposit_methods (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                details TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS deposits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                method_id INTEGER,
+                amount REAL NOT NULL,
+                proof TEXT,
+                status TEXT DEFAULT 'pending',
+                admin_note TEXT,
+                created_at TEXT,
+                processed_at TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                amount REAL NOT NULL,
+                address TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                admin_note TEXT,
+                created_at TEXT,
+                processed_at TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                lot REAL NOT NULL,
+                entry REAL NOT NULL,
+                sl REAL,
+                tp REAL,
+                status TEXT DEFAULT 'Open',
+                close_price REAL,
+                profit REAL DEFAULT 0.0,
+                open_time TEXT,
+                close_time TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+        print("[UserTrading] DB initialized")
+        return True
+    except Exception as e:
+        print(f"[UserTrading] Init error: {e}")
+        return False
+
+def get_or_create_user(user_id, name="مستخدم"):
+    uid = str(user_id)
+    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("SELECT balance, name FROM users WHERE user_id=?", (uid,))
+    row = cur.fetchone()
+    if row:
+        balance, uname = row
+        conn.close()
+        return {"user_id": uid, "balance": balance, "name": uname}
+    now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    cur.execute("INSERT INTO users (user_id, name, balance, created_at) VALUES (?, ?, 0.0, ?)", (uid, name, now))
+    conn.commit()
+    conn.close()
+    return {"user_id": uid, "balance": 0.0, "name": name}
+
+def update_user_balance(user_id, new_balance):
+    uid = str(user_id)
+    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET balance=? WHERE user_id=?", (float(new_balance), uid))
+    conn.commit()
+    conn.close()
+
+def add_to_balance(user_id, amount):
+    user = get_or_create_user(user_id)
+    new_bal = user["balance"] + float(amount)
+    update_user_balance(user_id, new_bal)
+    return new_bal
+
+def get_open_user_trades(user_id=None):
+    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    if user_id:
+        cur.execute("SELECT * FROM user_trades WHERE user_id=? AND status='Open' ORDER BY id DESC", (str(user_id),))
+    else:
+        cur.execute("SELECT * FROM user_trades WHERE status='Open' ORDER BY id DESC")
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    conn.close()
+    return [dict(zip(cols, r)) for r in rows]
+
+def count_open_trades(user_id):
+    return len(get_open_user_trades(user_id))
+
+def calculate_profit(action, entry, close_price, lot):
+    diff = (close_price - entry) if action == "BUY" else (entry - close_price)
+    return round(diff * lot * CONTRACT_SIZE, 2)
+
+def open_user_trade(user_id, action, lot, entry, sl=None, tp=None):
+    user = get_or_create_user(user_id)
+    required_margin = lot * MARGIN_PER_LOT
+    if user["balance"] < required_margin:
+        return None, f"الرصيد غير كافٍ. المطلوب هامش تقريبي: {required_margin:.2f}$"
+    if count_open_trades(user_id) >= MAX_OPEN_TRADES_PER_USER:
+        return None, f"وصلت للحد الأقصى ({MAX_OPEN_TRADES_PER_USER}) صفقات مفتوحة"
+    now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO user_trades (user_id, action, lot, entry, sl, tp, status, open_time)
+        VALUES (?, ?, ?, ?, ?, ?, 'Open', ?)
+    """, (str(user_id), action, float(lot), float(entry), sl, tp, now))
+    trade_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return trade_id, None
+
+def close_user_trade(trade_id, close_price, status="Closed"):
+    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, action, lot, entry, status FROM user_trades WHERE id=?", (trade_id,))
+    row = cur.fetchone()
+    if not row or row[4] != "Open":
+        conn.close()
+        return False, 0, None
+    user_id, action, lot, entry, _ = row
+    profit = calculate_profit(action, entry, close_price, lot)
+    now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    cur.execute("""
+        UPDATE user_trades SET status=?, close_price=?, profit=?, close_time=? WHERE id=?
+    """, (status, float(close_price), profit, now, trade_id))
+    conn.commit()
+    conn.close()
+    add_to_balance(user_id, profit)
+    return True, profit, user_id
+
+def check_user_trades_price_loop(current_price):
+    if current_price is None:
+        return
+    open_trades = get_open_user_trades()
+    for trade in open_trades:
+        action = trade["action"]
+        entry = trade["entry"]
+        sl = trade["sl"]
+        tp = trade["tp"]
+        tid = trade["id"]
+        user_id = trade["user_id"]
+        hit_tp = False
+        hit_sl = False
+        if action == "BUY":
+            if tp and current_price >= tp:
+                hit_tp = True
+            elif sl and current_price <= sl:
+                hit_sl = True
+        else:
+            if tp and current_price <= tp:
+                hit_tp = True
+            elif sl and current_price >= sl:
+                hit_sl = True
+        if hit_tp or hit_sl:
+            status = "ضربت الهدف 🎯" if hit_tp else "ضربت الستوب 🛑"
+            success, profit, uid = close_user_trade(tid, current_price, status)
+            if success:
+                emoji = "🎯" if hit_tp else "🛑"
+                msg = (
+                    f"{emoji} <b>{status}</b>\n\n"
+                    f"🆔 الصفقة: <code>#{tid}</code>\n"
+                    f"📊 النوع: <code>{action}</code>\n"
+                    f"📦 الحجم: <code>{trade['lot']}</code>\n"
+                    f"⚡ الدخول: <code>{entry}</code>\n"
+                    f"💰 الإغلاق: <code>{current_price:.2f}</code>\n"
+                    f"📈 النتيجة: <code>{profit:+.2f}$</code>"
+                )
+                try:
+                    send_message_with_keyboard(uid, msg, get_main_keyboard())
+                except:
+                    pass
+                try:
+                    for admin in ADMIN_IDS:
+                        send_message_with_keyboard(admin, f"🔔 صفقة مستخدم أُغلقت\n{msg}", get_main_keyboard())
+                except:
+                    pass
+
 
 # ============================================================
 # TRADING SETTINGS
 # ============================================================
 
 ATR_MULTIPLIER_SL = 1.5
-# سكالبينج خاطف - اهداف قريبة R:R
 ATR_MULTIPLIER_TP1 = 0.4
 ATR_MULTIPLIER_TP2 = 1.0
 ATR_MULTIPLIER_TP3 = 1.6
@@ -246,7 +463,7 @@ MAX_DATA_AGE_SECONDS = 300
 MAX_SENT_EVENTS = 8000
 MAX_TRADE_LOG = 1500
 
-MIN_CANDLE_STRENGTH = 45  # Early entry - كان 60 ثم 73
+MIN_CANDLE_STRENGTH = 45
 OVEREXTENSION_CANDLES = 40
 OVEREXTENSION_POINTS = 36.0
 SWEEP_LOOKBACK = 20
@@ -388,7 +605,6 @@ def atomic_write_json(filepath, data):
         print(f"[AtomicWrite] Error: {e}")
         return False
 
-
 def load_sent_events():
     global sent_events
     try:
@@ -401,11 +617,9 @@ def load_sent_events():
     except:
         sent_events = set()
 
-
 def save_sent_events():
     with events_lock:
         atomic_write_json(EVENTS_FILE, list(sent_events))
-
 
 def load_ai_memory():
     global ai_memory
@@ -418,12 +632,10 @@ def load_ai_memory():
     except Exception as e:
         print(f"[ERROR] Load AI: {e}")
 
-
 def save_ai_memory():
     if len(ai_memory.get("trade_log", [])) > MAX_TRADE_LOG:
         ai_memory["trade_log"] = ai_memory["trade_log"][-MAX_TRADE_LOG:]
     atomic_write_json(MEMORY_FILE, ai_memory)
-
 
 def save_active_trade():
     try:
@@ -445,9 +657,8 @@ def save_active_trade():
     except Exception as e:
         print(f"[ActiveTrade] Save error: {e}")
 
-
 def load_active_trade():
-    global active_trade, entry_price, target_sl, target_tp1, target_tp2, target_tp3, m5_bias_at_entry, last_tp1_win_timestamp, last_tp1_win_price, m5_bias_at_entry
+    global active_trade, entry_price, target_sl, target_tp1, target_tp2, target_tp3, m5_bias_at_entry
     global tp1_hit, tp2_hit, tp3_hit, trade_open_time, trade_signal_type, trade_signal_id
     global trade_grade, trade_reason, trade_rsi, trade_ema_diff, trade_atr
     global trade_bias, trade_score, timeout_final
@@ -481,7 +692,6 @@ def load_active_trade():
     except Exception as e:
         print(f"[ActiveTrade] Load error: {e}")
 
-
 def acquire_bot_lock():
     try:
         if os.path.exists(bot_lock_file):
@@ -496,7 +706,6 @@ def acquire_bot_lock():
         return True
     except:
         return True
-
 
 def update_bot_lock():
     try:
@@ -544,7 +753,6 @@ def get_usd_high_impact_news():
         print(f"[News] Error: {e}")
     return news_cache if news_cache else []
 
-
 def is_news_block_active(news_list, current_time):
     for news in news_list:
         news_time = news["time"]
@@ -553,7 +761,6 @@ def is_news_block_active(news_list, current_time):
         if (news_time - timedelta(minutes=NEWS_BLOCK_BEFORE_MIN)) <= current_time <= (news_time + timedelta(minutes=NEWS_BLOCK_AFTER_MIN)):
             return True, news
     return False, None
-
 
 def send_news_report(news_list, saudi_now):
     global news_reports_sent
@@ -617,7 +824,6 @@ def get_biquote_ohlcv(interval: str, limit: int = 200, max_retries: int = 2):
                 time.sleep(0.35)
     return None
 
-
 def get_biquote_price(max_retries=3):
     for attempt in range(max_retries):
         try:
@@ -629,7 +835,6 @@ def get_biquote_price(max_retries=3):
         except Exception as e:
             print(f"[Price] Attempt {attempt+1} failed: {e}")
         time.sleep(0.4)
-
     try:
         closes = tf_data.get("5m", {}).get("closes", [])
         if closes:
@@ -638,13 +843,11 @@ def get_biquote_price(max_retries=3):
         pass
     return None
 
-
 def is_data_fresh(timeframe="5m"):
     last_update = tf_data.get(timeframe, {}).get("last_update", 0)
     if last_update == 0:
         return False
     return (time.time() - last_update) <= MAX_DATA_AGE_SECONDS
-
 
 def update_all_timeframes():
     global tf_data
@@ -666,16 +869,13 @@ def send_to_telegram(message, event_id=None, parse_mode="HTML"):
     global sent_events
     if not TELEGRAM_TOKEN:
         return False
-
     if event_id:
         with telegram_lock:
             if event_id in sent_events:
                 return False
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     success_count = 0
     total_chats = 0
-
     for chat_id in [PRIVATE_CHAT_ID, CHANNEL_CHAT_ID]:
         if not chat_id:
             continue
@@ -692,24 +892,51 @@ def send_to_telegram(message, event_id=None, parse_mode="HTML"):
             time.sleep(0.15)
         except Exception as e:
             print(f"[Telegram] Error: {e}")
-
     if event_id and success_count == total_chats and total_chats > 0:
         with telegram_lock:
             sent_events.add(event_id)
             save_sent_events()
         return True
-
     return success_count > 0
-
 
 def create_signal_id(signal_type, candle_time):
     raw = f"{signal_type}_{candle_time}".encode("utf-8")
     short_hash = hashlib.md5(raw).hexdigest()[:8].upper()
     return f"{signal_type}-{datetime.now(SAUDI_TZ).strftime('%Y%m%d')}-{short_hash}"
 
+def send_message_with_keyboard(chat_id, text, keyboard=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    if keyboard:
+        payload["reply_markup"] = keyboard
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        return r.ok
+    except Exception as e:
+        print(f"[Keyboard] Error: {e}")
+        return False
+
+def get_main_keyboard():
+    return {
+        "keyboard": [
+            ["💰 رصيدي", "📈 تداول"],
+            ["📥 إيداع", "📤 سحب"],
+            ["📊 صفقاتي المفتوحة", "📜 سجل صفقاتي"],
+            ["📊 سعر XAUUSD", "📰 أخبار السوق"],
+            ["🆔 ايدي"]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False
+    }
+
 
 # ============================================================
-# INDICATORS
+# INDICATORS + ANALYSIS (نفس منطقك الأصلي)
 # ============================================================
 
 def calculate_ema(values, period):
@@ -721,7 +948,6 @@ def calculate_ema(values, period):
     for i in range(period, len(values)):
         ema[i] = (values[i] - ema[i - 1]) * multiplier + ema[i - 1]
     return ema
-
 
 def calculate_rsi(closes, period=14):
     if not closes or len(closes) < period + 1:
@@ -740,7 +966,6 @@ def calculate_rsi(closes, period=14):
         return 100.0
     return 100 - (100 / (1 + avg_gain / avg_loss))
 
-
 def calculate_atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
         return 0.0
@@ -753,16 +978,10 @@ def calculate_atr(highs, lows, closes, period=14):
         atr = ((atr * (period - 1)) + trs[i]) / period
     return atr
 
-
 def calculate_sma(values, period):
     if not values or len(values) < period:
         return [0.0] * len(values)
     return [0.0]*(period-1) + [sum(values[i-period+1:i+1])/period for i in range(period-1, len(values))]
-
-
-# ============================================================
-# OVEREXTENSION FILTER - DYNAMIC 70/20 STRONG TREND ELSE 36/40
-# ============================================================
 
 def is_overextended(closes, highs, lows, signal_type, context=None):
     if context and context.get("h1_bias") == context.get("m15_bias") == context.get("m5_bias") and context.get("h1_bias") != "NEUTRAL":
@@ -771,35 +990,24 @@ def is_overextended(closes, highs, lows, signal_type, context=None):
     else:
         over_points = 36.0
         over_candles = 40
-
     if len(closes) < over_candles + 1:
         return False
-
     recent_highs = highs[-over_candles:]
     recent_lows = lows[-over_candles:]
     highest = max(recent_highs)
     lowest = min(recent_lows)
     move = highest - lowest
     current = closes[-1]
-
     if move < over_points:
         return False
-
     mid = lowest + (move * 0.50)
-
     if signal_type == "BUY":
         if current > mid and move >= over_points:
             return True
     else:
         if current < mid and move >= over_points:
             return True
-
     return False
-
-
-# ============================================================
-# EMA20 PULLBACK ENTRY
-# ============================================================
 
 def check_ema_pullback_entry(closes, highs, lows, signal_type, context):
     if len(closes) < 25:
@@ -822,11 +1030,6 @@ def check_ema_pullback_entry(closes, highs, lows, signal_type, context):
                 return True
     return False
 
-
-# ============================================================
-# CANDLESTICKS + FVG + SWEEPS - 16 PATTERNS + 5 CANDLES
-# ============================================================
-
 def detect_fvg(highs, lows):
     if len(highs) < 3:
         return {"has_fvg": False, "type": "NONE"}
@@ -836,37 +1039,27 @@ def detect_fvg(highs, lows):
         return {"has_fvg": True, "type": "BEARISH"}
     return {"has_fvg": False, "type": "NONE"}
 
-
 def detect_candlestick_pattern(opens, highs, lows, closes, volumes=None):
     if len(closes) < SWEEP_LOOKBACK + 2:
         return {"pattern": "NONE", "bullish": False, "bearish": False, "strength": 0}
     if len(closes) < 5:
         return {"pattern": "NONE", "bullish": False, "bearish": False, "strength": 0}
-
     o1, h1, l1, c1 = opens[-5], highs[-5], lows[-5], closes[-5]
     o2, h2, l2, c2 = opens[-4], highs[-4], lows[-4], closes[-4]
     o3, h3, l3, c3 = opens[-3], highs[-3], lows[-3], closes[-3]
     o4, h4, l4, c4 = opens[-2], highs[-2], lows[-2], closes[-2]
     o5, h5, l5, c5 = opens[-1], highs[-1], lows[-1], closes[-1]
-
-    def body(o,c):
-        return abs(c-o)
-    def rng(h,l):
-        return h-l if h!=l else 0.0001
-    def upper(h,o,c):
-        return h-max(o,c)
-    def lower(l,o,c):
-        return min(o,c)-l
-    def is_bull(o,c):
-        return c>o
-    def is_bear(o,c):
-        return c<o
+    def body(o,c): return abs(c-o)
+    def rng(h,l): return h-l if h!=l else 0.0001
+    def upper(h,o,c): return h-max(o,c)
+    def lower(l,o,c): return min(o,c)-l
+    def is_bull(o,c): return c>o
+    def is_bear(o,c): return c<o
     def avg_body(n=20):
         try:
             return sum([abs(closes[-i]-opens[-i]) for i in range(1,n+1)])/n
         except:
             return body(o5,c5)
-
     b1, b2, b3, b4, b5 = body(o1,c1), body(o2,c2), body(o3,c3), body(o4,c4), body(o5,c5)
     r1, r2, r3, r4, r5 = rng(h1,l1), rng(h2,l2), rng(h3,l3), rng(h4,l4), rng(h5,l5)
     u1, u2, u3, u4, u5 = upper(h1,o1,c1), upper(h2,o2,c2), upper(h3,o3,c3), upper(h4,o4,c4), upper(h5,o5,c5)
@@ -874,37 +1067,30 @@ def detect_candlestick_pattern(opens, highs, lows, closes, volumes=None):
     avg_b = avg_body(20)
     prev_high = max(highs[-SWEEP_LOOKBACK-1:-1])
     prev_low = min(lows[-SWEEP_LOOKBACK-1:-1])
-
     if l5 < prev_low and c5 > prev_low and lw5 > b5 * 1.3:
         return {"pattern": "Bullish Liquidity Sweep", "bullish": True, "bearish": False, "strength": 95}
     if h5 > prev_high and c5 < prev_high and u5 > b5 * 1.3:
         return {"pattern": "Bearish Liquidity Sweep", "bullish": False, "bearish": True, "strength": 95}
-
     if is_bear(o3,c3) and b3 > avg_b*0.8 and body(o4,c4) < avg_b*0.4 and is_bull(o5,c5) and c5 > (o3+c3)/2 and b5 > avg_b*0.8:
         return {"pattern": "Morning Star", "bullish": True, "bearish": False, "strength": 94}
     if is_bull(o3,c3) and b3 > avg_b*0.8 and body(o4,c4) < avg_b*0.4 and is_bear(o5,c5) and c5 < (o3+c3)/2 and b5 > avg_b*0.8:
         return {"pattern": "Evening Star", "bullish": False, "bearish": True, "strength": 94}
-
     if is_bull(o3,c3) and is_bull(o4,c4) and is_bull(o5,c5) and c4>c3 and c5>c4 and b3>avg_b*0.6 and b4>avg_b*0.6 and b5>avg_b*0.6:
         return {"pattern": "Three White Soldiers", "bullish": True, "bearish": False, "strength": 92}
     if is_bear(o3,c3) and is_bear(o4,c4) and is_bear(o5,c5) and c4<c3 and c5<c4 and b3>avg_b*0.6 and b4>avg_b*0.6 and b5>avg_b*0.6:
         return {"pattern": "Three Black Crows", "bullish": False, "bearish": True, "strength": 92}
-
     if is_bear(o4,c4) and is_bull(o5,c5) and c5 >= o4 and o5 <= c4 and b5 > b4 * 0.85:
         return {"pattern": "Bullish Engulfing", "bullish": True, "bearish": False, "strength": 90}
     if is_bull(o4,c4) and is_bear(o5,c5) and c5 <= o4 and o5 >= c4 and b5 > b4 * 0.85:
         return {"pattern": "Bearish Engulfing", "bullish": False, "bearish": True, "strength": 90}
-
     if abs(l4-l5) <= r5*0.1 and lw4 > b4*1.2 and lw5 > b5*0.8 and is_bull(o5,c5):
         return {"pattern": "Tweezer Bottom", "bullish": True, "bearish": False, "strength": 88}
     if abs(h4-h5) <= r5*0.1 and u4 > b4*1.2 and u5 > b5*0.8 and is_bear(o5,c5):
         return {"pattern": "Tweezer Top", "bullish": False, "bearish": True, "strength": 88}
-
     if is_bear(o4,c4) and is_bull(o5,c5) and o5 < l4 and c5 > (o4+c4)/2 and c5 < o4:
         return {"pattern": "Piercing Line", "bullish": True, "bearish": False, "strength": 87}
     if is_bull(o4,c4) and is_bear(o5,c5) and o5 > h4 and c5 < (o4+c4)/2 and c5 > o4:
         return {"pattern": "Dark Cloud Cover", "bullish": False, "bearish": True, "strength": 87}
-
     if lw5 > b5 * 1.9 and u5 < b5 * 0.4 and is_bull(o5,c5):
         return {"pattern": "Hammer", "bullish": True, "bearish": False, "strength": 86}
     if lw5 > b5 * 1.8 and u5 < b5 * 0.5:
@@ -913,12 +1099,10 @@ def detect_candlestick_pattern(opens, highs, lows, closes, volumes=None):
         return {"pattern": "Shooting Star", "bullish": False, "bearish": True, "strength": 86}
     if u5 > b5 * 1.9 and lw5 < b5 * 0.4 and is_bull(o5,c5):
         return {"pattern": "Inverted Hammer", "bullish": True, "bearish": False, "strength": 82}
-
     if b4 > avg_b*0.8 and b5 < b4*0.5 and is_bear(o4,c4) and is_bull(o5,c5) and o5 > c4 and c5 < o4:
         return {"pattern": "Bullish Harami", "bullish": True, "bearish": False, "strength": 80}
     if b4 > avg_b*0.8 and b5 < b4*0.5 and is_bull(o4,c4) and is_bear(o5,c5) and o5 < c4 and c5 > o4:
         return {"pattern": "Bearish Harami", "bullish": False, "bearish": True, "strength": 80}
-
     if is_bull(o5,c5) and b5 > r5 * 0.75:
         return {"pattern": "Bullish Marubozu", "bullish": True, "bearish": False, "strength": 82}
     if is_bear(o5,c5) and b5 > r5 * 0.75:
@@ -927,25 +1111,20 @@ def detect_candlestick_pattern(opens, highs, lows, closes, volumes=None):
         return {"pattern": "Strong Bullish Candle", "bullish": True, "bearish": False, "strength": 76}
     if is_bear(o5,c5) and b5 > r5 * 0.58 and u5 < b5 * 0.3:
         return {"pattern": "Strong Bearish Candle", "bullish": False, "bearish": True, "strength": 76}
-    # انماط اضافية جديدة - 4 انماط قوية
-    # Bullish/Bearish Kicker - شمعة قوية تعكس الاتجاه بقوة
     if is_bull(o5,c5) and is_bear(o4,c4) and o5 > c4 and b5 > avg_b*1.2 and abs(o5 - c4) > avg_b*0.3:
         return {"pattern": "Bullish Kicker", "bullish": True, "bearish": False, "strength": 93}
     if is_bear(o5,c5) and is_bull(o4,c4) and o5 < c4 and b5 > avg_b*1.2 and abs(o5 - c4) > avg_b*0.3:
         return {"pattern": "Bearish Kicker", "bullish": False, "bearish": True, "strength": 93}
-    # Rising/Falling Three Methods - استمرار قوي للترند
     if is_bull(o5,c5) and is_bull(o3,c3) and b5 > avg_b*0.9 and c5 > h4 and c5 > h2:
         return {"pattern": "Rising Three Methods", "bullish": True, "bearish": False, "strength": 89}
     if is_bear(o5,c5) and is_bear(o3,c3) and b5 > avg_b*0.9 and c5 < l4 and c5 < l2:
         return {"pattern": "Falling Three Methods", "bullish": False, "bearish": True, "strength": 89}
-
     if b5 < r5*0.15 and r5 > avg_b*0.5:
         if is_bull(opens[-1], closes[-1]) and closes[-1] > max(opens[-2], closes[-2]):
             return {"pattern": "Doji + Bullish Confirmation", "bullish": True, "bearish": False, "strength": 78}
         if is_bear(opens[-1], closes[-1]) and closes[-1] < min(opens[-2], closes[-2]):
             return {"pattern": "Doji + Bearish Confirmation", "bullish": False, "bearish": True, "strength": 78}
     return {"pattern": "NONE", "bullish": False, "bearish": False, "strength": 0}
-
 
 def check_support_resistance_proximity(current_price, highs, lows, period=SR_LOOKBACK, tolerance=4.0):
     if len(highs) < period:
@@ -957,19 +1136,12 @@ def check_support_resistance_proximity(current_price, highs, lows, period=SR_LOO
         "near_resistance": abs(current_price - resistance) <= tolerance
     }
 
-
-# ============================================================
-# CONTEXT
-# ============================================================
-
 def analyze_market_context():
     h1 = tf_data.get("1h", {}).get("closes", [])
     m15 = tf_data.get("15m", {}).get("closes", [])
     m5 = tf_data.get("5m", {}).get("closes", [])
-
     if len(m5) < 30:
         return {"h1_bias": "NEUTRAL", "m15_bias": "NEUTRAL", "m5_bias": "NEUTRAL", "bias": "NEUTRAL", "m15_above_ema50": False, "m15_below_ema50": False, "m15_ema50_rising": False, "m15_ema50_falling": False, "h1_above_ema50": False}
-
     h1_bias = "NEUTRAL"
     h1_above_ema50 = False
     if len(h1) >= 50:
@@ -980,7 +1152,6 @@ def analyze_market_context():
     elif len(h1) >= 20:
         e20 = calculate_ema(h1, 20)
         h1_bias = "BULLISH" if h1[-1] > e20[-1] else "BEARISH"
-
     m15_bias = "NEUTRAL"
     m15_above_ema50 = False
     m15_below_ema50 = False
@@ -993,7 +1164,6 @@ def analyze_market_context():
         m15_bias = "BULLISH" if e9[-1] > e21[-1] else "BEARISH"
         m15_above_ema50 = m15[-1] > e50_m15[-1]
         m15_below_ema50 = m15[-1] < e50_m15[-1]
-        # هل EMA50 صاعد ام هابط
         if len(e50_m15) >= 5:
             m15_ema50_rising = e50_m15[-1] > e50_m15[-3]
             m15_ema50_falling = e50_m15[-1] < e50_m15[-3]
@@ -1001,19 +1171,16 @@ def analyze_market_context():
         e9 = calculate_ema(m15, 9)
         e21 = calculate_ema(m15, 21)
         m15_bias = "BULLISH" if e9[-1] > e21[-1] else "BEARISH"
-
     m5_bias = "NEUTRAL"
     e9m5 = calculate_ema(m5, 9)
     e21m5 = calculate_ema(m5, 21)
     m5_bias = "BULLISH" if e9m5[-1] > e21m5[-1] else "BEARISH"
-
     m1_bias = "NEUTRAL"
     m1 = tf_data.get("1m", {}).get("closes", [])
     if len(m1) >= 21:
         e9_m1 = calculate_ema(m1, 9)
         e21_m1 = calculate_ema(m1, 21)
         m1_bias = "BULLISH" if e9_m1[-1] > e21_m1[-1] else "BEARISH"
-
     return {
         "h1_bias": h1_bias, "m15_bias": m15_bias, "m5_bias": m5_bias, "m1_bias": m1_bias,
         "bias": m15_bias if m15_bias == m5_bias else m5_bias,
@@ -1024,7 +1191,6 @@ def analyze_market_context():
         "h1_above_ema50": h1_above_ema50
     }
 
-
 def check_trade_against_context(signal_type, context, candle=None):
     m15 = context.get("m15_bias", "NEUTRAL")
     m5 = context.get("m5_bias", "NEUTRAL")
@@ -1034,19 +1200,15 @@ def check_trade_against_context(signal_type, context, candle=None):
     m15_below_ema50 = context.get("m15_below_ema50", False)
     m15_ema50_rising = context.get("m15_ema50_rising", False)
     m15_ema50_falling = context.get("m15_ema50_falling", False)
-    h1_above_ema50 = context.get("h1_above_ema50", False)
     strength = candle.get("strength", 0) if candle else 0
     pattern = candle.get("pattern", "") if candle else ""
-    is_strong_reversal = strength >= 80 and "Kicker" in pattern  # فقط Kicker 85+ يعتبر انعكاس حقيقي
-
+    is_strong_reversal = strength >= 80 and "Kicker" in pattern
     if signal_type == "BUY":
-        # لا تدخل BUY اذا M15 تحت EMA50 و EMA50 هابط - ترند هابط قوي
         if m15_below_ema50 and m15_ema50_falling and not is_strong_reversal:
             return False
         if m1_bias == "BEARISH" and not is_strong_reversal:
             return False
         if m5 == "BULLISH" and m1_bias == "BULLISH":
-            # حتى لو M5 صاعد، تأكد M15 مو هابط قوي
             if m15_below_ema50 and m15_ema50_falling:
                 return False
             return True
@@ -1058,13 +1220,11 @@ def check_trade_against_context(signal_type, context, candle=None):
             return False
         return m1_bias == "BULLISH" and m15_above_ema50
     else:
-        # لا تدخل SELL اذا M15 فوق EMA50 و EMA50 صاعد - ترند صاعد قوي (هذا اللي صار يوم 29)
         if m15_above_ema50 and m15_ema50_rising and not is_strong_reversal:
             return False
         if m1_bias == "BULLISH" and not is_strong_reversal:
             return False
         if m5 == "BEARISH" and m1_bias == "BEARISH":
-            # حتى لو M5 هابط، تأكد M15 مو صاعد قوي
             if m15_above_ema50 and m15_ema50_rising:
                 return False
             return True
@@ -1076,7 +1236,6 @@ def check_trade_against_context(signal_type, context, candle=None):
             return False
         return m1_bias == "BEARISH" and m15_below_ema50
 
-
 def check_choppy_market(closes, highs, lows):
     if len(closes) < 20:
         return False
@@ -1084,16 +1243,6 @@ def check_choppy_market(closes, highs, lows):
     if atr == 0:
         return False
     return (max(highs[-20:]) - min(lows[-20:])) < atr * CHOPPY_RANGE_MULTIPLIER
-
-
-# ============================================================
-# WAVE
-# ============================================================
-
-
-# ============================================================
-# EARLY ENTRY - 1M PULLBACK / FVG / EMA9 / EMA20
-# ============================================================
 
 def check_early_pullback_entry_1m():
     m1 = tf_data.get("1m", {})
@@ -1118,32 +1267,21 @@ def check_early_pullback_entry_1m():
             return "SELL"
     return None
 
-
 def detect_wave_momentum(closes, opens, highs, lows, volumes=None, context=None):
     if len(closes) < OVEREXTENSION_CANDLES + 5:
         return {"signal": "NONE"}
-
     ema9 = calculate_ema(closes, EMA_FAST)
     ema21 = calculate_ema(closes, EMA_SLOW)
     rsi = calculate_rsi(closes)
     candle = detect_candlestick_pattern(opens, highs, lows, closes, volumes)
     ema_diff = ema9[-1] - ema21[-1]
-
-    # Early entry - كان يرفض اذا قوة الشمعة اقل من 60، الان 45 للـ Scalping المبكر
     if candle["strength"] < MIN_CANDLE_STRENGTH:
-        # اسمح بالـ Pinbar / Wick Sweep حتى لو قوة اقل - ذيل شمعة يعني ارتداد مبكر من القاع/القمة
         if not ("Pinbar" in candle["pattern"] or "Hammer" in candle["pattern"] or "Sweep" in candle["pattern"] or "Wick" in candle["pattern"] or candle["strength"] >= 35):
             return {"signal": "NONE"}
-
-    if (candle["bullish"] and
-        ema9[-1] > ema21[-1] and
-        rsi <= RSI_MAX_FOR_BUY and
-        closes[-1] > opens[-1]):
-
+    if (candle["bullish"] and ema9[-1] > ema21[-1] and rsi <= RSI_MAX_FOR_BUY and closes[-1] > opens[-1]):
         if is_overextended(closes, highs, lows, "BUY", context):
             if not check_ema_pullback_entry(closes, highs, lows, "BUY", context or {}):
                 return {"signal": "NONE", "reason": "Overextended Up"}
-
         return {
             "signal": "BUY",
             "rsi": rsi,
@@ -1151,16 +1289,10 @@ def detect_wave_momentum(closes, opens, highs, lows, volumes=None, context=None)
             "candle": candle,
             "reason": f"BUY: {candle['pattern']} + EMA + RSI {rsi:.1f}"
         }
-
-    if (candle["bearish"] and
-        ema9[-1] < ema21[-1] and
-        rsi >= RSI_MIN_FOR_SELL and
-        closes[-1] < opens[-1]):
-
+    if (candle["bearish"] and ema9[-1] < ema21[-1] and rsi >= RSI_MIN_FOR_SELL and closes[-1] < opens[-1]):
         if is_overextended(closes, highs, lows, "SELL", context):
             if not check_ema_pullback_entry(closes, highs, lows, "SELL", context or {}):
                 return {"signal": "NONE", "reason": "Overextended Down"}
-
         return {
             "signal": "SELL",
             "rsi": rsi,
@@ -1168,19 +1300,9 @@ def detect_wave_momentum(closes, opens, highs, lows, volumes=None, context=None)
             "candle": candle,
             "reason": f"SELL: {candle['pattern']} + EMA + RSI {rsi:.1f}"
         }
-
     return {"signal": "NONE"}
 
-
-# ============================================================
-# RISK
-# ============================================================
-
 def calculate_dynamic_risk(entry, trade_type, atr, lows=None, highs=None):
-    """
-    سكالبينج خاطف - TP1 0.4R, TP2 1.0R, TP3 1.6R
-    TP1 يضرب = تقفل رابحة مباشرة - لا تكمل ولا تضرب ستوب
-    """
     dist = atr * ATR_MULTIPLIER_SL if atr > 0 else MIN_SL_PRICE_DISTANCE
     dist = max(MIN_SL_PRICE_DISTANCE, min(MAX_SL_PRICE_DISTANCE, dist))
     if trade_type == "BUY":
@@ -1203,14 +1325,8 @@ def calculate_dynamic_risk(entry, trade_type, atr, lows=None, highs=None):
         tp3 = entry - actual_dist * ATR_MULTIPLIER_TP3
     return {"sl": round(sl, 2), "tp1": round(tp1, 2), "tp2": round(tp2, 2), "tp3": round(tp3, 2), "risk_distance": round(actual_dist, 2)}
 
-
-# ============================================================
-# SCORE
-# ============================================================
-
 def calculate_trade_score(rsi, ema_diff, candle, context, sr_info, fvg_info, signal_type):
     score = 48
-
     if candle["strength"] >= 90:
         score += 22
     elif candle["strength"] >= 80:
@@ -1219,51 +1335,36 @@ def calculate_trade_score(rsi, ema_diff, candle, context, sr_info, fvg_info, sig
         score += 11
     elif candle["strength"] >= 60:
         score += 8
-
     if abs(ema_diff) > 0.15:
         score += 12
-
     if signal_type == "BUY" and sr_info.get("near_support"):
         score += 10
     if signal_type == "SELL" and sr_info.get("near_resistance"):
         score += 10
-
     if fvg_info.get("has_fvg") and fvg_info.get("type") == ("BULLISH" if signal_type == "BUY" else "BEARISH"):
         score += 9
-
     m15 = context.get("m15_bias", "NEUTRAL")
     m5 = context.get("m5_bias", "NEUTRAL")
     h1 = context.get("h1_bias", "NEUTRAL")
-
     if m15 == m5 and m15 != "NEUTRAL":
         score += 14
-
     if h1 == m15 == m5 and h1 != "NEUTRAL":
         score += 8
-
     if signal_type == "BUY" and h1 == "BEARISH":
         score -= 15
     if signal_type == "SELL" and h1 == "BULLISH":
         score -= 15
-
     if rsi > 68 or rsi < 32:
         score -= 15
-
     return max(0, min(score, 100))
-
 
 def classify_trade_with_score(score):
     if score >= 86:
         return "A+", "🏆", "SEND"
     elif score >= 65:
-        return "A", "✅", "SEND"  # Early entry - كان 74 والان 65 لالتقاط اول 20-30% من الموجة
+        return "A", "✅", "SEND"
     else:
         return "B", "⚠️", "SKIP"
-
-
-# ============================================================
-# RECORD + SMART FEAR
-# ============================================================
 
 def record_trade_result(trade_data, result_type, profit=0, duration=0):
     global ai_memory, weekly_wins, weekly_losses, weekly_total_profit
@@ -1286,7 +1387,6 @@ def record_trade_result(trade_data, result_type, profit=0, duration=0):
         }
         ai_memory.setdefault("trade_log", []).append(record)
         ai_memory["total_trades"] = ai_memory.get("total_trades", 0) + 1
-
         if result_type in ("TP2", "WIN", "REVERSAL_WIN"):
             ai_memory["total_wins"] = ai_memory.get("total_wins", 0) + 1
             weekly_wins += 1
@@ -1297,9 +1397,6 @@ def record_trade_result(trade_data, result_type, profit=0, duration=0):
             weekly_losses += 1
             consecutive_losses += 1
             daily_loss_total += abs(profit)
-        elif result_type in ("BE", "M5_FLIP_BE"):
-            pass
-
         weekly_total_profit += profit
         total = ai_memory.get("total_wins", 0) + ai_memory.get("total_losses", 0)
         if total > 0:
@@ -1307,7 +1404,6 @@ def record_trade_result(trade_data, result_type, profit=0, duration=0):
         save_ai_memory()
     except Exception as e:
         print(f"[AI] Record error: {e}")
-
 
 def should_skip_trade():
     global consecutive_losses, last_consecutive_loss_pause, daily_loss_total
@@ -1323,24 +1419,9 @@ def should_skip_trade():
         return True
     return False
 
-    if daily_loss_total >= DAILY_LOSS_LIMIT:
-        return True
-
-    if daily_losses >= MAX_DAILY_LOSSES:
-        return True
-
-    if consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-        if last_consecutive_loss_pause is None:
-            last_consecutive_loss_pause = datetime.now(SAUDI_TZ)
-            return True
-        if (datetime.now(SAUDI_TZ) - last_consecutive_loss_pause).total_seconds() / 60 < PAUSE_AFTER_CONSECUTIVE_LOSSES_MIN:
-            return True
-        last_consecutive_loss_pause = None
-    return False
-
 
 # ============================================================
-# MARKET ALERTS
+# MARKET ALERTS + MAIN ANALYSIS (نفس منطقك)
 # ============================================================
 
 def is_market_open(saudi_now=None):
@@ -1352,7 +1433,6 @@ def is_market_open(saudi_now=None):
     if wd == 6: return hour >= 18
     if wd == 4: return hour < 17
     return True
-
 
 def send_pre_market_report(saudi_now):
     ctx = analyze_market_context()
@@ -1367,7 +1447,6 @@ def send_pre_market_report(saudi_now):
     )
     send_to_telegram(msg, event_id=f"PREMARKET_{saudi_now.date()}")
 
-
 def send_market_open_alert(saudi_now):
     ctx = analyze_market_context()
     price = get_biquote_price()
@@ -1380,7 +1459,6 @@ def send_market_open_alert(saudi_now):
     )
     send_to_telegram(msg, event_id=f"OPEN_{saudi_now.date()}")
 
-
 def send_market_close_alert(saudi_now):
     msg = (
         f"🔴 <b>إغلاق السوق</b>\n\n"
@@ -1390,7 +1468,6 @@ def send_market_close_alert(saudi_now):
         f"💰 النقاط: {daily_total_profit:.2f}"
     )
     send_to_telegram(msg, event_id=f"CLOSE_{saudi_now.date()}")
-
 
 def check_market_state(saudi_now):
     global last_market_state, pre_market_sent
@@ -1406,41 +1483,31 @@ def check_market_state(saudi_now):
             send_market_close_alert(saudi_now)
         last_market_state = current
 
-
-# ============================================================
-# MAIN ANALYSIS
-# ============================================================
-
 def analyze_market():
-    global active_trade, entry_price, target_sl, target_tp1, target_tp2, target_tp3, m5_bias_at_entry, last_tp1_win_timestamp, last_tp1_win_price, m5_bias_at_entry
+    global active_trade, entry_price, target_sl, target_tp1, target_tp2, target_tp3, m5_bias_at_entry
     global tp1_hit, tp2_hit, tp3_hit, trade_open_time, trade_signal_type, trade_signal_id
     global trade_grade, trade_reason, trade_rsi, trade_score, timeout_final
     global daily_signals, daily_completed_trades, daily_wins, daily_losses
     global daily_tp1_hits, daily_tp2_hits, daily_sl_hits, daily_be_hits, daily_timeout
     global daily_a_grade, daily_b_grade, daily_reversals, daily_total_profit
     global last_reversal_time, last_sl_timestamp, last_timeout_timestamp, last_signal_time
-    global consecutive_losses
+    global consecutive_losses, last_tp1_win_timestamp, last_tp1_win_price
 
-    # Timeframe Shift - الدخول من 1m والاتجاه العام من 15m/1h
     m1 = tf_data.get("1m", {})
     m1_closes = m1.get("closes", [])
     m1_opens = m1.get("opens", [])
     m1_highs = m1.get("highs", [])
     m1_lows = m1.get("lows", [])
     m1_volumes = m1.get("volumes", [])
-
     m5 = tf_data.get("5m", {})
     closes = m5.get("closes", [])
     opens = m5.get("opens", [])
     highs = m5.get("highs", [])
     lows = m5.get("lows", [])
     volumes = m5.get("volumes", [])
-    
     use_1m = len(m1_closes) >= 30 and is_data_fresh("1m")
-
     if len(closes) < OVEREXTENSION_CANDLES + 5 or not is_data_fresh("5m"):
         return
-
     price = closes[-1]
     now = datetime.now(SAUDI_TZ)
     context = analyze_market_context()
@@ -1448,29 +1515,15 @@ def analyze_market():
     if active_trade:
         profit = (price - entry_price) if active_trade == "BUY" else (entry_price - price)
         elapsed = (now - trade_open_time).total_seconds() / 60
-
         trade_data = {
-            "signal_type": trade_signal_type,
-            "entry": entry_price,
-            "sl": target_sl,
-            "tp1": target_tp1,
-            "tp2": target_tp2,
-            "rsi": trade_rsi,
-            "score": trade_score,
-            "grade": trade_grade,
-            "reason": trade_reason
+            "signal_type": trade_signal_type, "entry": entry_price, "sl": target_sl,
+            "tp1": target_tp1, "tp2": target_tp2, "rsi": trade_rsi, "score": trade_score,
+            "grade": trade_grade, "reason": trade_reason
         }
-
         m5_bias = context.get("m5_bias", "NEUTRAL")
         if not tp1_hit:
-            # قلب M5 حقيقي فقط اذا كان BULLISH عند الدخول وانقلب BEARISH - مو اذا كان BEARISH من البداية
             if active_trade == "BUY" and m5_bias == "BEARISH":
-                # اذا كان BEARISH من البداية عند الدخول، لا تطلع - هذا دخول عكس الترند مقصود
-                if m5_bias_at_entry == "BEARISH":
-                    # كان BEARISH من البداية، لا تطلع M5 FLIP - خليه يكمل للهدف
-                    pass
-                elif elapsed >= 5 and profit < 0:
-                    # انقلب فعلا بعد ما كان BULLISH وخسران - اطلع
+                if m5_bias_at_entry != "BEARISH" and elapsed >= 5 and profit < 0:
                     daily_completed_trades += 1
                     daily_total_profit += profit
                     if profit >= 0:
@@ -1483,22 +1536,13 @@ def analyze_market():
                         result_type = "M5_FLIP_LOSS"
                         title = f"🛑 EXIT M5 FLIP - LOSS"
                     record_trade_result(trade_data, result_type, profit, elapsed)
-                    send_to_telegram(
-                        f"<b>{title}</b>\n\n"
-                        f"M5 انقلب إلى BEARISH\n"
-                        f"الدخول: {entry_price}\n"
-                        f"الخروج: {price}\n"
-                        f"{profit:+.2f} نقطة | {elapsed:.0f}د"
-                    )
+                    send_to_telegram(f"<b>{title}</b>\n\nM5 انقلب إلى BEARISH\nالدخول: {entry_price}\nالخروج: {price}\n{profit:+.2f} نقطة | {elapsed:.0f}د")
                     active_trade = None
                     tp1_hit = tp2_hit = tp3_hit = False
                     save_active_trade()
                     return
-
             if active_trade == "SELL" and m5_bias == "BULLISH":
-                if m5_bias_at_entry == "BULLISH":
-                    pass
-                elif elapsed >= 5 and profit < 0:
+                if m5_bias_at_entry != "BULLISH" and elapsed >= 5 and profit < 0:
                     daily_completed_trades += 1
                     daily_total_profit += profit
                     if profit >= 0:
@@ -1511,22 +1555,13 @@ def analyze_market():
                         result_type = "M5_FLIP_LOSS"
                         title = f"🛑 EXIT M5 FLIP - LOSS"
                     record_trade_result(trade_data, result_type, profit, elapsed)
-                    send_to_telegram(
-                        f"<b>{title}</b>\n\n"
-                        f"M5 انقلب إلى BULLISH\n"
-                        f"الدخول: {entry_price}\n"
-                        f"الخروج: {price}\n"
-                        f"{profit:+.2f} نقطة | {elapsed:.0f}د"
-                    )
+                    send_to_telegram(f"<b>{title}</b>\n\nM5 انقلب إلى BULLISH\nالدخول: {entry_price}\nالخروج: {price}\n{profit:+.2f} نقطة | {elapsed:.0f}د")
                     active_trade = None
                     tp1_hit = tp2_hit = tp3_hit = False
                     save_active_trade()
                     return
-
-        # مدة الصفقة 40 دقيقة - اذا ربحان يكمل للهدف
         if elapsed >= TIMEOUT_MINUTES and not tp1_hit and not timeout_final:
             if profit >= 0.8:
-                # ربحان - خليها تكمل للهدف
                 pass
             elif abs(profit) < 2.5:
                 timeout_final = True
@@ -1539,7 +1574,6 @@ def analyze_market():
                 tp1_hit = tp2_hit = timeout_final = False
                 save_active_trade()
                 return
-
         if (active_trade == "BUY" and price <= target_sl) or (active_trade == "SELL" and price >= target_sl):
             daily_completed_trades += 1
             daily_total_profit += profit
@@ -1566,11 +1600,9 @@ def analyze_market():
             tp1_hit = tp2_hit = False
             save_active_trade()
             return
-
         if not tp1_hit and ((active_trade == "BUY" and price >= target_tp1 - 0.3) or (active_trade == "SELL" and price <= target_tp1 + 0.3)):
             tp1_hit = True
             daily_tp1_hits += 1
-            # سكالبينج: يوم يضرب التأمين (TP1 0.4R) خلاص تقفل رابحة مباشرة - لا تضرب ستوب
             last_tp1_win_timestamp = now
             last_tp1_win_price = entry_price
             daily_wins += 1
@@ -1584,17 +1616,13 @@ def analyze_market():
             tp1_hit = tp2_hit = tp3_hit = False
             save_active_trade()
             return
-
         if tp1_hit and not tp2_hit and ((active_trade == "BUY" and price >= target_tp2 - 0.3) or (active_trade == "SELL" and price <= target_tp2 + 0.3)):
             tp2_hit = True
             daily_tp2_hits += 1
-            # لا نقفل الصفقة عند TP2 اذا فيه TP3 - ننقل الستوب لنقطة الدخول ونكمل
             if BREAK_EVEN_AT_TP1:
-                target_sl = entry_price + (1 if active_trade=="BUY" else -1) * 1.0  # تأمين ربح بسيط
+                target_sl = entry_price + (1 if active_trade=="BUY" else -1) * 1.0
             send_to_telegram(f"🚀 <b>TP2 - {active_trade} - مؤمن ✅</b>\n+{profit:.2f}\nمكملين لـ TP3: {target_tp3}")
             save_active_trade()
-            # لا نرجع، نكمل لـ TP3
-
         if tp2_hit and not tp3_hit and ((active_trade == "BUY" and price >= target_tp3 - 0.3) or (active_trade == "SELL" and price <= target_tp3 + 0.3)):
             tp3_hit = True
             daily_wins += 1
@@ -1607,21 +1635,6 @@ def analyze_market():
             tp1_hit = tp2_hit = tp3_hit = False
             save_active_trade()
             return
-
-        if tp1_hit and not tp2_hit and not tp3_hit and elapsed >= TIMEOUT_MINUTES and profit >= 0.8:
-            # اذا ضرب TP1 ومر 40 دقيقة ولسه ربحان، خليه يكمل
-            pass
-        elif tp1_hit and not tp2_hit and ((active_trade == "BUY" and price >= target_tp2) or (active_trade == "SELL" and price <= target_tp2)) == False and elapsed >= TIMEOUT_MINUTES + 20 and profit > 0:
-            # اذا ضرب TP1 ومر 60 دقيقة ولسه ما ضرب TP2 بس ربحان، اقفل على ربح
-            daily_wins += 1
-            daily_completed_trades += 1
-            record_trade_result(trade_data, "TP1_WIN", profit, elapsed)
-            send_to_telegram(f"✅ <b>إغلاق رابح بعد 60د - {active_trade}</b>\n+{profit:.2f}")
-            active_trade = None
-            tp1_hit = tp2_hit = tp3_hit = False
-            save_active_trade()
-            return
-
     else:
         if daily_signals >= MAX_TRADES_PER_DAY or should_skip_trade():
             return
@@ -1634,101 +1647,13 @@ def analyze_market():
                 return
         if last_signal_time and (now - last_signal_time).total_seconds() < 40:
             return
-
         if ENABLE_NEWS_FILTER:
             news = get_usd_high_impact_news()
             blocked, _ = is_news_block_active(news, now)
             if blocked:
                 return
-
         if check_choppy_market(closes, highs, lows):
-            # لا نمنع التداول اذا فيه قلب اتجاه حقيقي - حتى لو السوق متذبذب
-            # نتحقق من قلب الاتجاه قبل ما نرجع
-            if active_trade is not None:
-                m1_tmp = tf_data.get("1m", {})
-                if len(m1_tmp.get("closes", [])) >= 21:
-                    m1_c = m1_tmp["closes"]
-                    m1_o = m1_tmp.get("opens", [])
-                    e9_tmp = calculate_ema(m1_c, 9)
-                    e21_tmp = calculate_ema(m1_c, 21)
-                    if len(e9_tmp) > 0 and len(e21_tmp) > 0:
-                        m1_bias_tmp = "BULLISH" if e9_tmp[-1] > e21_tmp[-1] else "BEARISH"
-                        # قلب حقيقي: اذا SELL مفتوحة و M1 BULLISH و شمعة قوية
-                        if (active_trade == "SELL" and m1_bias_tmp == "BULLISH") or (active_trade == "BUY" and m1_bias_tmp == "BEARISH"):
-                            pass  # لا تمنع، خليه يكمل لفحص القلب
-                        else:
-                            return
-                else:
-                    return
-            else:
-                return
-
-        # قلب اتجاه حقيقي - اذا صفقة مفتوحة وعكس الاتجاه بقوة على 1m
-        if active_trade is not None and not tp1_hit:
-            m1_data = tf_data.get("1m", {})
-            m1_closes = m1_data.get("closes", [])
-            m1_opens = m1_data.get("opens", [])
-            m1_highs = m1_data.get("highs", [])
-            m1_lows = m1_data.get("lows", [])
-            if len(m1_closes) >= 25:
-                ema9_1m = calculate_ema(m1_closes, 9)
-                ema21_1m = calculate_ema(m1_closes, 21)
-                if len(ema9_1m) > 0 and len(ema21_1m) > 0:
-                    m1_bias_check = "BULLISH" if ema9_1m[-1] > ema21_1m[-1] else "BEARISH"
-                    # SELL مفتوحة و M1 صار BULLISH بقوة + شمعة صعود كبيرة
-                    if active_trade == "SELL" and m1_bias_check == "BULLISH":
-                        last_body = abs(m1_closes[-1] - m1_opens[-1]) if len(m1_opens) > 0 else 0
-                        avg_body = 0
-                        if len(m1_closes) >= 10:
-                            bodies = [abs(m1_closes[i] - m1_opens[i]) for i in range(-10, -1) if i < len(m1_opens)]
-                            avg_body = sum(bodies) / len(bodies) if bodies else last_body
-                        # شمعة قوية 1.8x + فوق EMA9 + EMA9 فوق EMA21 = قلب حقيقي
-                        if last_body > avg_body * 1.8 and m1_closes[-1] > ema9_1m[-1] and ema9_1m[-1] > ema21_1m[-1]:
-                            profit = entry_price - price
-                            daily_completed_trades += 1
-                            daily_total_profit += profit
-                            if profit >= 0:
-                                daily_wins += 1
-                                daily_be_hits += 1
-                                result_type = "REVERSAL_BE_WIN"
-                                title = f"🔄 قلب اتجاه حقيقي - SELL -> BUY - رابحة +{profit:.2f}"
-                            else:
-                                daily_be_hits += 1
-                                result_type = "REVERSAL_BE"
-                                title = f"🔄 قلب اتجاه حقيقي - SELL -> BUY - BE {profit:+.2f}"
-                            record_trade_result(trade_data, result_type, profit, elapsed)
-                            send_to_telegram(f"<b>{title}</b>\nالدخول: {entry_price}\nالخروج: {price}\nM1 BULLISH قوي + شمعة {last_body:.2f} - بداية صعود حقيقي")
-                            active_trade = None
-                            tp1_hit = tp2_hit = tp3_hit = False
-                            save_active_trade()
-                            # لا نرجع، نكمل لفتح BUY مباشرة من بداية الصعود
-                    # BUY مفتوحة و M1 صار BEARISH بقوة
-                    elif active_trade == "BUY" and m1_bias_check == "BEARISH":
-                        last_body = abs(m1_closes[-1] - m1_opens[-1]) if len(m1_opens) > 0 else 0
-                        avg_body = 0
-                        if len(m1_closes) >= 10:
-                            bodies = [abs(m1_closes[i] - m1_opens[i]) for i in range(-10, -1) if i < len(m1_opens)]
-                            avg_body = sum(bodies) / len(bodies) if bodies else last_body
-                        if last_body > avg_body * 1.8 and m1_closes[-1] < ema9_1m[-1] and ema9_1m[-1] < ema21_1m[-1]:
-                            profit = price - entry_price
-                            daily_completed_trades += 1
-                            daily_total_profit += profit
-                            if profit >= 0:
-                                daily_wins += 1
-                                daily_be_hits += 1
-                                result_type = "REVERSAL_BE_WIN"
-                                title = f"🔄 قلب اتجاه حقيقي - BUY -> SELL - رابحة +{profit:.2f}"
-                            else:
-                                daily_be_hits += 1
-                                result_type = "REVERSAL_BE"
-                                title = f"🔄 قلب اتجاه حقيقي - BUY -> SELL - BE {profit:+.2f}"
-                            record_trade_result(trade_data, result_type, profit, elapsed)
-                            send_to_telegram(f"<b>{title}</b>\nالدخول: {entry_price}\nالخروج: {price}\nM1 BEARISH قوي + شمعة {last_body:.2f} - بداية هبوط حقيقي")
-                            active_trade = None
-                            tp1_hit = tp2_hit = tp3_hit = False
-                            save_active_trade()
-
-        # Early entry - نرصد على 1m اولا للدخول المبكر من القاع/القمة (اول 20-30% من الموجة)
+            return
         if use_1m:
             wave_1m = detect_wave_momentum(m1_closes, m1_opens, m1_highs, m1_lows, m1_volumes, context)
             if wave_1m["signal"] != "NONE":
@@ -1745,7 +1670,7 @@ def analyze_market():
                     early = check_early_pullback_entry_1m()
                     if early:
                         rsi = calculate_rsi(m1_closes)
-                        wave = {"signal": early, "rsi": rsi, "ema_diff": 0.2 if early=="BUY" else -0.2, "candle": {"pattern": "Early Pullback 1m EMA/FVG", "strength": 65}, "reason": f"{early}: Early Pullback 1m to EMA9/20/FVG - اول 20% من الموجة"}
+                        wave = {"signal": early, "rsi": rsi, "ema_diff": 0.2 if early=="BUY" else -0.2, "candle": {"pattern": "Early Pullback 1m EMA/FVG", "strength": 65}, "reason": f"{early}: Early Pullback 1m to EMA9/20/FVG"}
         else:
             wave = detect_wave_momentum(closes, opens, highs, lows, volumes, context)
         if wave["signal"] == "NONE":
@@ -1755,28 +1680,21 @@ def analyze_market():
                 wave = {"signal": "SELL", "rsi": calculate_rsi(closes), "ema_diff": -0.2, "candle": {"pattern": "EMA20 Pullback", "strength": 70}, "reason": "SELL: EMA20 Pullback in strong trend"}
             else:
                 return
-
         if not check_trade_against_context(wave["signal"], context, wave.get("candle")):
             return
-
         sr = check_support_resistance_proximity(price, highs, lows)
         fvg = detect_fvg(highs, lows)
-
         score = calculate_trade_score(wave["rsi"], wave["ema_diff"], wave["candle"], context, sr, fvg, wave["signal"])
         grade, emoji, action = classify_trade_with_score(score)
         if action != "SEND":
             return
-
         with signal_lock:
             atr = calculate_atr(highs, lows, closes, 14) or 8.0
             risk = calculate_dynamic_risk(price, wave["signal"], atr, lows, highs)
-
             candle_time = m5.get("times", ["unknown"])[-1]
             new_id = create_signal_id(wave["signal"], candle_time)
-
             if new_id in sent_events:
                 return
-
             msg = (
                 f"{'🟢' if wave['signal']=='BUY' else '🔴'} <b>إشارة {wave['signal']} - QUALITY+</b>\n\n"
                 f"🆔 <code>{new_id}</code>\n"
@@ -1790,7 +1708,6 @@ def analyze_market():
                 f"🧠 H1: {context['h1_bias']} | M15: {context['m15_bias']} | M5: {context['m5_bias']}\n"
                 f"📌 {wave['reason']}"
             )
-
             if send_to_telegram(msg, event_id=new_id):
                 try:
                     save_new_trade_to_db(action=wave["signal"], entry=price, target=risk["tp2"], stop_loss=risk["sl"], pair="XAUUSD", tp1=risk["tp1"], tp2=risk["tp2"], grade=f"{grade} {emoji}", reason=wave["reason"])
@@ -1821,256 +1738,104 @@ def analyze_market():
 
 
 # ============================================================
-# REPORTS + LOOP
+# USER COMMANDS (تداول + إيداع + سحب)
 # ============================================================
-
-def send_market_status(saudi_now):
-    global last_market_report_hour
-
-    current_hour_key = saudi_now.strftime("%Y-%m-%d_%H")
-    if last_market_report_hour == current_hour_key:
-        return
-
-    update_all_timeframes()
-    time.sleep(0.3)
-
-    price = get_biquote_price()
-    price_text = f"{price:.3f}" if price is not None else "غير متوفر"
-
-    context = analyze_market_context()
-
-    msg = (
-        f"📊 <b>تقرير حالة السوق</b>\n"
-        f"📅 <code>{saudi_now.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-        f"💰 السعر: <code>{price_text}</code>\n"
-        f"🧠 H1: <code>{context['h1_bias']}</code> | M15: <code>{context['m15_bias']}</code> | M5: <code>{context['m5_bias']}</code>\n"
-        f"📈 إشارات: <code>{daily_signals}</code> | مكتملة: <code>{daily_completed_trades}</code>\n"
-        f"✅ رابحة: <code>{daily_wins}</code> | ❌ خاسرة: <code>{daily_losses}</code> | 🛡️ تعادل: <code>{daily_be_hits}</code>"
-    )
-
-    event_id = f"STATUS_{current_hour_key}"
-    if send_to_telegram(msg, event_id=event_id):
-        last_market_report_hour = current_hour_key
-
-
-def send_daily_summary():
-    global daily_signals, daily_completed_trades, daily_wins, daily_losses
-    global daily_tp1_hits, daily_tp2_hits, daily_sl_hits, daily_be_hits, daily_timeout
-    global daily_a_grade, daily_b_grade, daily_reversals, daily_total_profit
-    global last_summary_date, consecutive_losses, daily_loss_total
-
-    total = daily_wins + daily_losses
-    wr = (daily_wins / total * 100) if total > 0 else 0
-    msg = (
-        f"📊 <b>ملخص يومي</b>\n"
-        f"📅 {last_summary_date}\n\n"
-        f"إشارات: {daily_signals}\n"
-        f"✅ {daily_wins} | ❌ {daily_losses} | 🛡️ {daily_be_hits}\n"
-        f"نسبة النجاح: {wr:.1f}%\n"
-        f"النقاط: {daily_total_profit:.2f}\n"
-        f"Timeout: {daily_timeout}"
-    )
-    send_to_telegram(msg, event_id=f"DAILY_{last_summary_date}")
-
-    daily_signals = daily_completed_trades = daily_wins = daily_losses = 0
-    daily_tp1_hits = daily_tp2_hits = daily_sl_hits = daily_be_hits = daily_timeout = 0
-    daily_a_grade = daily_b_grade = daily_reversals = 0
-    daily_total_profit = 0.0
-    consecutive_losses = 0
-    daily_loss_total = 0.0
-    last_summary_date = datetime.now(SAUDI_TZ).date()
-
-
-def send_startup_report():
-    price = get_biquote_price()
-    price_text = f"{price:.3f}" if price is not None else "غير متوفر"
-    msg = (
-        f"🚀 <b>VIP GOLD - SQLITE EDITION - WITH DB TRACKING</b>\n\n"
-        f"تم التشغيل بنجاح\n"
-        f"📅 {datetime.now(SAUDI_TZ).strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"• دخول مبكر من 1m (اول 20-30%)\n"
-        f"• حفظ الصفقات في SQLite + ذاكرة\n"
-        f"• تحديث لحظي هدف/ستوب كل ثانية\n"
-        f"• فلتر تمدد 70$/20 و 36$/40\n"
-        f"• قوة الشمعة ≥ 45 + Pinbar\n"
-        f"• Score ≥ 65\n"
-        f"• 16 نمط شمعة + دعم/مقاومة\n"
-        f"• ستوب أقصى 16$\n\n"
-        f"💰 السعر: {price_text}"
-    )
-    send_to_telegram(msg, event_id=f"STARTUP_{datetime.now(SAUDI_TZ).strftime('%Y%m%d%H')}")
-
-
-
-
-class AdvancedServerHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        try:
-            uptime = int((datetime.now(SAUDI_TZ) - server_started_at).total_seconds())
-            price = get_biquote_price()
-            price_text = f"{price:.3f}" if price is not None else "N/A"
-            with trades_memory_lock:
-                open_count = len(active_trades_memory)
-                trades_html = ""
-                for t in active_trades_memory[-10:]:
-                    trades_html += f"<p>#{t['id']} {t['action']} Entry:{t['entry']} Target:{t['target']} SL:{t['stop_loss']} Status:Open</p>"
-            html = f"""<html><body style="font-family:Arial;background:#111;color:#eee;padding:30px;">
-            <h1>KALARITH VIP GOLD - SQLITE EDITION</h1>
-            <p>Status: ACTIVE | Uptime: {uptime}s | Open Trades in Memory: {open_count}</p>
-            <p>Active: {active_trade or 'NONE'} | Entry: {entry_price}</p>
-            <p>SL: {target_sl} | TP1: {target_tp1} | TP2: {target_tp2} | TP3: {target_tp3}</p>
-            <p>Signals: {daily_signals} | Wins: {daily_wins} | Losses: {daily_losses}</p>
-            <p>💰 {price_text}</p>
-            <p>Error: {last_error or 'None'}</p>
-            <hr>
-            <h3>Open Trades (Memory - SQLite)</h3>
-            {trades_html if trades_html else "<p>No open trades</p>"}
-            </body></html>"""
-            self.send_response(200)
-            self.send_header("Content-type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(html.encode())
-        except:
-            self.send_response(500)
-    def log_message(self, *args): return
-
-
-def run_enterprise_server():
-    try:
-        port = int(os.environ.get("PORT", "10000"))
-        HTTPServer(("0.0.0.0", port), AdvancedServerHandler).serve_forever()
-    except Exception as e:
-        print(f"[HTTP] {e}")
-
-
-def trading_bot_loop():
-    global last_bot_loop, last_error, pre_market_sent
-    time.sleep(2)
-    load_sent_events()
-    load_ai_memory()
-    load_active_trade()
-    send_startup_report()
-
-    while True:
-        try:
-            last_bot_loop = datetime.now(SAUDI_TZ)
-            now = datetime.now(SAUDI_TZ)
-            update_bot_lock()
-
-            if now.date() != last_summary_date:
-                send_daily_summary()
-
-            check_market_state(now)
-
-            now_ny = now.astimezone(NY_TZ)
-            if now_ny.weekday() == 6 and now_ny.hour == 17 and 25 <= now_ny.minute < 55 and not pre_market_sent:
-                send_pre_market_report(now)
-                pre_market_sent = True
-
-            if now.minute <= 3:
-                send_market_status(now)
-
-            if now.minute % 5 == 0 and now.second < 3:
-                send_news_report(get_usd_high_impact_news(), now)
-
-            update_all_timeframes()
-            analyze_market()
-            try:
-                live_price = get_biquote_price()
-                if live_price:
-                    check_open_trades_price_loop(live_price)
-            except Exception as e:
-                print(f"[SQLite Loop] Error: {e}")
-            time.sleep(1)
-        except Exception as e:
-            last_error = str(e)
-            print(f"[ERROR] {e}")
-            time.sleep(2)
-
-
-
-
-# ============================================================
-# BALANCE SYSTEM + REPLY KEYBOARD MARKUP
-# ============================================================
-
-USER_BALANCE_FILE = "user_balances.json"
-ADMIN_IDS = [8952278702, 8950515154]
-
-user_balances = {}
-balance_lock = threading.Lock()
-last_update_id = 0
-
-def load_user_balances():
-    global user_balances
-    try:
-        if os.path.exists(USER_BALANCE_FILE):
-            with open(USER_BALANCE_FILE, "r", encoding="utf-8") as f:
-                user_balances = json.load(f)
-    except:
-        user_balances = {}
-
-def save_user_balances():
-    with balance_lock:
-        atomic_write_json(USER_BALANCE_FILE, user_balances)
-
-def get_user_balance(user_id):
-    return user_balances.get(str(user_id), {"balance": 0.0, "name": "مستخدم"})
-
-def set_user_balance(user_id, amount, name=None):
-    uid = str(user_id)
-    with balance_lock:
-        if uid not in user_balances:
-            user_balances[uid] = {"balance": 0.0, "name": name or uid}
-        user_balances[uid]["balance"] = float(amount)
-        if name:
-            user_balances[uid]["name"] = name
-        atomic_write_json(USER_BALANCE_FILE, user_balances)
-
-def add_user_if_new(user):
-    uid = str(user.get("id"))
-    name = user.get("first_name", "") + " " + user.get("last_name", "")
-    if uid not in user_balances:
-        set_user_balance(uid, 0.0, name.strip() or uid)
-
-def get_main_keyboard():
-    return {
-        "keyboard": [
-            ["💰 رصيدي", "📊 سعر XAUUSD"],
-            ["📊 صفقاتي المفتوحة", "📜 السجل"],
-            ["📦 تحميل القاعدة", "📊 تصدير CSV"],
-            ["📰 أخبار السوق", "🆔 ايدي"]
-        ],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
-    }
-
-def send_message_with_keyboard(chat_id, text, keyboard=None):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    if keyboard:
-        payload["reply_markup"] = keyboard
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        return r.ok
-    except Exception as e:
-        print(f"[Keyboard] Error: {e}")
-        return False
 
 def handle_balance_command(chat_id, user_id):
-    bal = get_user_balance(user_id)
+    user = get_or_create_user(user_id)
+    open_count = count_open_trades(user_id)
     msg = (
-        f"💰 <b>رصيدك الحالي</b>\n\n"
-        f"👤 المستخدم: <code>{bal.get('name', user_id)}</code>\n"
+        f"💰 <b>حسابك التجاري</b>\n\n"
+        f"👤 الاسم: <code>{user['name']}</code>\n"
         f"🆔 ID: <code>{user_id}</code>\n"
-        f"💵 الرصيد: <code>{bal.get('balance', 0.0):.2f} $</code>\n\n"
-        f"للاستفسار تواصل مع الأدمن"
+        f"💵 الرصيد المتاح: <code>{user['balance']:.2f} $</code>\n"
+        f"📊 الصفقات المفتوحة: <code>{open_count}</code>\n\n"
+        f"📌 الحجم الافتراضي: <code>{DEFAULT_LOT}</code> لوت"
     )
+    send_message_with_keyboard(chat_id, msg, get_main_keyboard())
+
+def handle_trade_menu(chat_id, user_id):
+    user = get_or_create_user(user_id)
+    if user["balance"] <= 0:
+        send_message_with_keyboard(chat_id, "❌ رصيدك صفر. قم بالإيداع أولاً.", get_main_keyboard())
+        return
+    keyboard = {
+        "keyboard": [
+            ["🟢 شراء BUY", "🔴 بيع SELL"],
+            ["🔙 رجوع"]
+        ],
+        "resize_keyboard": True
+    }
+    msg = (
+        f"📈 <b>قسم التداول</b>\n\n"
+        f"💵 رصيدك: <code>{user['balance']:.2f}$</code>\n"
+        f"📦 الحجم: <code>{DEFAULT_LOT}</code> لوت\n"
+        f"📊 الحد الأقصى: <code>{MAX_OPEN_TRADES_PER_USER}</code> صفقات\n\n"
+        f"اختر نوع الصفقة:"
+    )
+    send_message_with_keyboard(chat_id, msg, keyboard)
+
+def handle_open_trade(chat_id, user_id, action):
+    price = get_biquote_price()
+    if price is None:
+        send_message_with_keyboard(chat_id, "❌ تعذر الحصول على السعر حالياً.", get_main_keyboard())
+        return
+    atr_approx = 8.0
+    if action == "BUY":
+        sl = round(price - atr_approx * 1.2, 2)
+        tp = round(price + atr_approx * 1.8, 2)
+    else:
+        sl = round(price + atr_approx * 1.2, 2)
+        tp = round(price - atr_approx * 1.8, 2)
+    trade_id, error = open_user_trade(user_id, action, DEFAULT_LOT, price, sl, tp)
+    if error:
+        send_message_with_keyboard(chat_id, f"❌ {error}", get_main_keyboard())
+        return
+    msg = (
+        f"{'🟢' if action=='BUY' else '🔴'} <b>تم فتح صفقة {action}</b>\n\n"
+        f"🆔 رقم الصفقة: <code>#{trade_id}</code>\n"
+        f"📦 الحجم: <code>{DEFAULT_LOT}</code>\n"
+        f"⚡ سعر الدخول: <code>{price:.2f}</code>\n"
+        f"🛑 الستوب: <code>{sl}</code>\n"
+        f"🎯 الهدف: <code>{tp}</code>\n\n"
+        f"الصفقة قيد المتابعة تلقائياً"
+    )
+    send_message_with_keyboard(chat_id, msg, get_main_keyboard())
+
+def handle_my_open_trades(chat_id, user_id):
+    trades = get_open_user_trades(user_id)
+    if not trades:
+        send_message_with_keyboard(chat_id, "لا توجد صفقات مفتوحة حالياً.", get_main_keyboard())
+        return
+    price = get_biquote_price() or 0
+    msg = f"📊 <b>صفقاتك المفتوحة ({len(trades)})</b>\n\n"
+    for t in trades:
+        floating = calculate_profit(t["action"], t["entry"], price, t["lot"])
+        msg += (
+            f"🆔 <code>#{t['id']}</code> | {t['action']}\n"
+            f"دخول: {t['entry']} | حالياً: {price:.2f}\n"
+            f"الربح العائم: <code>{floating:+.2f}$</code>\n"
+            f"SL: {t['sl']} | TP: {t['tp']}\n\n"
+        )
+    send_message_with_keyboard(chat_id, msg, get_main_keyboard())
+
+def handle_my_trade_history(chat_id, user_id):
+    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, action, lot, entry, close_price, profit, status, open_time 
+        FROM user_trades 
+        WHERE user_id=? AND status != 'Open' 
+        ORDER BY id DESC LIMIT 15
+    """, (str(user_id),))
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        send_message_with_keyboard(chat_id, "لا يوجد سجل صفقات بعد.", get_main_keyboard())
+        return
+    msg = "📜 <b>آخر 15 صفقة مغلقة</b>\n\n"
+    for r in rows:
+        msg += f"#{r[0]} {r[1]} {r[2]} لوت | دخول {r[3]} → {r[4]} | {r[5]:+.2f}$ | {r[6]}\n"
     send_message_with_keyboard(chat_id, msg, get_main_keyboard())
 
 def handle_price_command(chat_id):
@@ -2099,17 +1864,157 @@ def handle_news_command(chat_id):
             msg += f"• {n['title']} - {t}\nالمتوقع: {n['forecast']} | السابق: {n['previous']}\n\n"
     send_message_with_keyboard(chat_id, msg, get_main_keyboard())
 
+def handle_deposit_start(chat_id, user_id):
+    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, details FROM deposit_methods WHERE is_active=1")
+    methods = cur.fetchall()
+    conn.close()
+    if not methods:
+        send_message_with_keyboard(chat_id, "❌ لا توجد طرق إيداع مفعلة حالياً. تواصل مع الأدمن.", get_main_keyboard())
+        return
+    msg = "📥 <b>اختر طريقة الإيداع:</b>\n\n"
+    keyboard_buttons = []
+    for m in methods:
+        msg += f"• {m[1]}\n"
+        keyboard_buttons.append([f"إيداع_{m[0]}_{m[1]}"])
+    keyboard_buttons.append(["🔙 رجوع"])
+    keyboard = {"keyboard": keyboard_buttons, "resize_keyboard": True}
+    send_message_with_keyboard(chat_id, msg, keyboard)
+
+def handle_deposit_method_selected(chat_id, user_id, method_id, method_name):
+    with user_states_lock:
+        user_states[str(user_id)] = {
+            "action": "deposit_amount",
+            "method_id": method_id,
+            "method_name": method_name
+        }
+    send_message_with_keyboard(chat_id, f"أدخل مبلغ الإيداع بالدولار (مثال: 100):", {"keyboard": [["🔙 رجوع"]], "resize_keyboard": True})
+
+def handle_deposit_amount(chat_id, user_id, text):
+    try:
+        amount = float(text.replace(",", "").strip())
+        if amount <= 0:
+            raise ValueError
+    except:
+        send_message_with_keyboard(chat_id, "❌ أدخل رقم صحيح (مثال: 50 أو 100.5)", {"keyboard": [["🔙 رجوع"]], "resize_keyboard": True})
+        return
+    with user_states_lock:
+        state = user_states.get(str(user_id), {})
+        state["amount"] = amount
+        state["action"] = "deposit_proof"
+        user_states[str(user_id)] = state
+    send_message_with_keyboard(chat_id, f"المبلغ: <code>{amount}$</code>\n\nالآن أرسل إثبات التحويل (نص أو تفاصيل العملية):", {"keyboard": [["🔙 رجوع"]], "resize_keyboard": True})
+
+def handle_deposit_proof(chat_id, user_id, proof_text):
+    with user_states_lock:
+        state = user_states.get(str(user_id), {})
+        if state.get("action") != "deposit_proof":
+            return
+        method_id = state.get("method_id")
+        amount = state.get("amount")
+        method_name = state.get("method_name", "")
+        user_states.pop(str(user_id), None)
+    now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO deposits (user_id, method_id, amount, proof, status, created_at)
+        VALUES (?, ?, ?, ?, 'pending', ?)
+    """, (str(user_id), method_id, amount, proof_text, now))
+    dep_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    user = get_or_create_user(user_id)
+    send_message_with_keyboard(chat_id, f"✅ تم إرسال طلب الإيداع بنجاح\n🆔 رقم الطلب: <code>#{dep_id}</code>\n⏳ بانتظار موافقة الأدمن", get_main_keyboard())
+    admin_msg = (
+        f"📥 <b>طلب إيداع جديد</b>\n\n"
+        f"🆔 الطلب: <code>#{dep_id}</code>\n"
+        f"👤 المستخدم: {user['name']} (<code>{user_id}</code>)\n"
+        f"💰 المبلغ: <code>{amount}$</code>\n"
+        f"📌 الطريقة: {method_name}\n"
+        f"📎 الإثبات:\n{proof_text}\n\n"
+        f"للقبول: /approve_dep {dep_id}\n"
+        f"للرفض: /reject_dep {dep_id} سبب"
+    )
+    for admin in ADMIN_IDS:
+        try:
+            send_message_with_keyboard(admin, admin_msg, get_main_keyboard())
+        except:
+            pass
+
+def handle_withdraw_start(chat_id, user_id):
+    user = get_or_create_user(user_id)
+    if user["balance"] <= 0:
+        send_message_with_keyboard(chat_id, "❌ رصيدك غير كافٍ للسحب.", get_main_keyboard())
+        return
+    with user_states_lock:
+        user_states[str(user_id)] = {"action": "withdraw_amount"}
+    send_message_with_keyboard(chat_id, f"📤 <b>طلب سحب</b>\n\nرصيدك الحالي: <code>{user['balance']:.2f}$</code>\n\nأدخل المبلغ المراد سحبه:", {"keyboard": [["🔙 رجوع"]], "resize_keyboard": True})
+
+def handle_withdraw_amount(chat_id, user_id, text):
+    try:
+        amount = float(text.replace(",", "").strip())
+        if amount <= 0:
+            raise ValueError
+    except:
+        send_message_with_keyboard(chat_id, "❌ أدخل رقم صحيح", {"keyboard": [["🔙 رجوع"]], "resize_keyboard": True})
+        return
+    user = get_or_create_user(user_id)
+    if amount > user["balance"]:
+        send_message_with_keyboard(chat_id, f"❌ المبلغ أكبر من رصيدك ({user['balance']:.2f}$)", {"keyboard": [["🔙 رجوع"]], "resize_keyboard": True})
+        return
+    with user_states_lock:
+        state = user_states.get(str(user_id), {})
+        state["amount"] = amount
+        state["action"] = "withdraw_address"
+        user_states[str(user_id)] = state
+    send_message_with_keyboard(chat_id, "أدخل عنوان المحفظة أو بيانات الحساب لاستلام المبلغ:", {"keyboard": [["🔙 رجوع"]], "resize_keyboard": True})
+
+def handle_withdraw_address(chat_id, user_id, address):
+    with user_states_lock:
+        state = user_states.get(str(user_id), {})
+        if state.get("action") != "withdraw_address":
+            return
+        amount = state.get("amount")
+        user_states.pop(str(user_id), None)
+    now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO withdrawals (user_id, amount, address, status, created_at)
+        VALUES (?, ?, ?, 'pending', ?)
+    """, (str(user_id), amount, address, now))
+    wid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    user = get_or_create_user(user_id)
+    send_message_with_keyboard(chat_id, f"✅ تم إرسال طلب السحب\n🆔 رقم الطلب: <code>#{wid}</code>\n⏳ بانتظار موافقة الأدمن", get_main_keyboard())
+    admin_msg = (
+        f"📤 <b>طلب سحب جديد</b>\n\n"
+        f"🆔 الطلب: <code>#{wid}</code>\n"
+        f"👤 {user['name']} (<code>{user_id}</code>)\n"
+        f"💰 المبلغ: <code>{amount}$</code>\n"
+        f"📍 العنوان:\n<code>{address}</code>\n\n"
+        f"للقبول: /approve_wd {wid}\n"
+        f"للرفض: /reject_wd {wid} سبب"
+    )
+    for admin in ADMIN_IDS:
+        try:
+            send_message_with_keyboard(admin, admin_msg, get_main_keyboard())
+        except:
+            pass
+
 def handle_admin_set_balance(admin_id, text, chat_id):
     try:
         parts = text.split()
         if len(parts) < 3:
-            send_message_with_keyboard(chat_id, "❌ الصيغة: /setbalance USER_ID AMOUNT\nمثال: /setbalance 123456 150.5", get_main_keyboard())
+            send_message_with_keyboard(chat_id, "❌ الصيغة: /setbalance USER_ID AMOUNT", get_main_keyboard())
             return
         target_id = parts[1]
         amount = float(parts[2])
-        set_user_balance(target_id, amount)
-        bal = get_user_balance(target_id)
-        send_message_with_keyboard(chat_id, f"✅ تم تحديث رصيد المستخدم\n🆔 {target_id}\n💰 الرصيد الجديد: {amount:.2f}$\n👤 الاسم: {bal.get('name')}", get_main_keyboard())
+        update_user_balance(target_id, amount)
+        send_message_with_keyboard(chat_id, f"✅ تم تحديث رصيد المستخدم\n🆔 {target_id}\n💰 الرصيد الجديد: {amount:.2f}$", get_main_keyboard())
         try:
             send_message_with_keyboard(target_id, f"💰 تم تحديث رصيدك بواسطة الأدمن\n💵 الرصيد الجديد: {amount:.2f}$", get_main_keyboard())
         except:
@@ -2117,90 +2022,145 @@ def handle_admin_set_balance(admin_id, text, chat_id):
     except Exception as e:
         send_message_with_keyboard(chat_id, f"❌ خطأ: {e}", get_main_keyboard())
 
-
-
-def handle_trades_command(chat_id):
+def handle_admin_approve_deposit(admin_id, text, chat_id):
     try:
-        init_trades_db()
-        with trades_memory_lock:
-            open_trades = list(active_trades_memory)
-        if not open_trades:
-            send_message_with_keyboard(chat_id, "No open trades", get_main_keyboard())
-            return
-        msg = f"Open trades: {len(open_trades)}\n"
-        for t in open_trades[-10:]:
-            msg += f"ID {t['id']} {t['action']} Entry {t['entry']} Target {t['target']} SL {t['stop_loss']}\n"
-        send_message_with_keyboard(chat_id, msg, get_main_keyboard())
-    except Exception as e:
-        send_message_with_keyboard(chat_id, f"Error: {e}", get_main_keyboard())
-
-def handle_history_command(chat_id):
-    try:
-        init_trades_db()
-        conn = sqlite3.connect(TRADES_DB_FILE, check_same_thread=False)
+        parts = text.split()
+        dep_id = int(parts[1])
+        conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
         cur = conn.cursor()
-        cur.execute("SELECT id, action, entry, target, status, close_price FROM trades WHERE status != 'Open' ORDER BY id DESC LIMIT 10")
-        rows = cur.fetchall()
+        cur.execute("SELECT user_id, amount, status FROM deposits WHERE id=?", (dep_id,))
+        row = cur.fetchone()
+        if not row:
+            send_message_with_keyboard(chat_id, "❌ الطلب غير موجود", get_main_keyboard())
+            conn.close()
+            return
+        user_id, amount, status = row
+        if status != "pending":
+            send_message_with_keyboard(chat_id, "❌ الطلب تمت معالجته مسبقاً", get_main_keyboard())
+            conn.close()
+            return
+        now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("UPDATE deposits SET status='approved', processed_at=? WHERE id=?", (now, dep_id))
+        conn.commit()
         conn.close()
-        if not rows:
-            send_message_with_keyboard(chat_id, "No history", get_main_keyboard())
-            return
-        msg = "Last 10 closed:\n"
-        for r in rows:
-            msg += f"ID {r[0]} {r[1]} Entry {r[2]} -> {r[5]} Status {r[4]}\n"
-        send_message_with_keyboard(chat_id, msg, get_main_keyboard())
+        new_bal = add_to_balance(user_id, amount)
+        send_message_with_keyboard(chat_id, f"✅ تم قبول الإيداع #{dep_id}\nتم إضافة {amount}$\nالرصيد الجديد: {new_bal:.2f}$", get_main_keyboard())
+        try:
+            send_message_with_keyboard(user_id, f"✅ تم قبول إيداعك رقم #{dep_id}\n💰 تم إضافة {amount}$ إلى رصيدك\nالرصيد الحالي: {new_bal:.2f}$", get_main_keyboard())
+        except:
+            pass
     except Exception as e:
-        send_message_with_keyboard(chat_id, f"Error: {e}", get_main_keyboard())
+        send_message_with_keyboard(chat_id, f"❌ خطأ: {e}", get_main_keyboard())
 
-def handle_download_db_command(chat_id):
+def handle_admin_reject_deposit(admin_id, text, chat_id):
     try:
-        import os
-        init_trades_db()
-        if not os.path.exists(TRADES_DB_FILE):
-            send_message_with_keyboard(chat_id, "No DB file yet", get_main_keyboard())
-            return
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
-        with open(TRADES_DB_FILE, 'rb') as db_file:
-            files = {'document': (TRADES_DB_FILE, db_file)}
-            data = {'chat_id': chat_id, 'caption': "Trades DB file"}
-            r = requests.post(url, data=data, files=files, timeout=20)
-        if r.ok:
-            send_message_with_keyboard(chat_id, "DB sent OK", get_main_keyboard())
-    except Exception as e:
-        send_message_with_keyboard(chat_id, f"Error: {e}", get_main_keyboard())
-
-def handle_export_csv_command(chat_id):
-    try:
-        import csv
-        init_trades_db()
-        conn = sqlite3.connect(TRADES_DB_FILE, check_same_thread=False)
+        parts = text.split(maxsplit=2)
+        dep_id = int(parts[1])
+        reason = parts[2] if len(parts) > 2 else "مرفوض"
+        conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
         cur = conn.cursor()
-        cur.execute("SELECT * FROM trades ORDER BY id DESC")
-        rows = cur.fetchall()
-        cols = [d[0] for d in cur.description]
-        conn.close()
-        if not rows:
-            send_message_with_keyboard(chat_id, "No data", get_main_keyboard())
+        cur.execute("SELECT user_id, status FROM deposits WHERE id=?", (dep_id,))
+        row = cur.fetchone()
+        if not row or row[1] != "pending":
+            send_message_with_keyboard(chat_id, "❌ الطلب غير موجود أو تمت معالجته", get_main_keyboard())
+            conn.close()
             return
-        csv_path = "/tmp/trades_export.csv"
-        with open(csv_path, 'w', newline='', encoding='utf-8-sig') as cf:
-            writer = csv.writer(cf)
-            writer.writerow(cols)
-            writer.writerows(rows)
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
-        with open(csv_path, 'rb') as f:
-            files = {'document': ('trades_export.csv', f)}
-            data = {'chat_id': chat_id, 'caption': f"CSV {len(rows)} trades"}
-            r = requests.post(url, data=data, files=files, timeout=20)
-        if r.ok:
-            send_message_with_keyboard(chat_id, "CSV sent OK", get_main_keyboard())
+        user_id = row[0]
+        now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("UPDATE deposits SET status='rejected', admin_note=?, processed_at=? WHERE id=?", (reason, now, dep_id))
+        conn.commit()
+        conn.close()
+        send_message_with_keyboard(chat_id, f"✅ تم رفض الإيداع #{dep_id}", get_main_keyboard())
+        try:
+            send_message_with_keyboard(user_id, f"❌ تم رفض طلب الإيداع #{dep_id}\nالسبب: {reason}", get_main_keyboard())
+        except:
+            pass
     except Exception as e:
-        send_message_with_keyboard(chat_id, f"Error: {e}", get_main_keyboard())
+        send_message_with_keyboard(chat_id, f"❌ خطأ: {e}", get_main_keyboard())
+
+def handle_admin_approve_withdraw(admin_id, text, chat_id):
+    try:
+        parts = text.split()
+        wid = int(parts[1])
+        conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, amount, status FROM withdrawals WHERE id=?", (wid,))
+        row = cur.fetchone()
+        if not row or row[2] != "pending":
+            send_message_with_keyboard(chat_id, "❌ الطلب غير موجود أو تمت معالجته", get_main_keyboard())
+            conn.close()
+            return
+        user_id, amount, _ = row
+        user = get_or_create_user(user_id)
+        if user["balance"] < amount:
+            send_message_with_keyboard(chat_id, "❌ رصيد المستخدم غير كافٍ", get_main_keyboard())
+            conn.close()
+            return
+        now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("UPDATE withdrawals SET status='approved', processed_at=? WHERE id=?", (now, wid))
+        conn.commit()
+        conn.close()
+        new_bal = add_to_balance(user_id, -amount)
+        send_message_with_keyboard(chat_id, f"✅ تم قبول السحب #{wid}\nتم خصم {amount}$\nالرصيد المتبقي: {new_bal:.2f}$", get_main_keyboard())
+        try:
+            send_message_with_keyboard(user_id, f"✅ تم قبول طلب السحب #{wid}\n💰 تم خصم {amount}$\nالرصيد المتبقي: {new_bal:.2f}$", get_main_keyboard())
+        except:
+            pass
+    except Exception as e:
+        send_message_with_keyboard(chat_id, f"❌ خطأ: {e}", get_main_keyboard())
+
+def handle_admin_reject_withdraw(admin_id, text, chat_id):
+    try:
+        parts = text.split(maxsplit=2)
+        wid = int(parts[1])
+        reason = parts[2] if len(parts) > 2 else "مرفوض"
+        conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, status FROM withdrawals WHERE id=?", (wid,))
+        row = cur.fetchone()
+        if not row or row[1] != "pending":
+            send_message_with_keyboard(chat_id, "❌ الطلب غير موجود أو تمت معالجته", get_main_keyboard())
+            conn.close()
+            return
+        user_id = row[0]
+        now = datetime.now(SAUDI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("UPDATE withdrawals SET status='rejected', admin_note=?, processed_at=? WHERE id=?", (reason, now, wid))
+        conn.commit()
+        conn.close()
+        send_message_with_keyboard(chat_id, f"✅ تم رفض السحب #{wid}", get_main_keyboard())
+        try:
+            send_message_with_keyboard(user_id, f"❌ تم رفض طلب السحب #{wid}\nالسبب: {reason}", get_main_keyboard())
+        except:
+            pass
+    except Exception as e:
+        send_message_with_keyboard(chat_id, f"❌ خطأ: {e}", get_main_keyboard())
+
+def handle_admin_add_method(admin_id, text, chat_id):
+    try:
+        content = text.replace("/addmethod", "").strip()
+        if "|" not in content:
+            send_message_with_keyboard(chat_id, "الصيغة:\n/addmethod اسم الطريقة | التفاصيل والعنوان", get_main_keyboard())
+            return
+        name, details = content.split("|", 1)
+        name = name.strip()
+        details = details.strip()
+        conn = sqlite3.connect(USER_DB_FILE, check_same_thread=False)
+        cur = conn.cursor()
+        cur.execute("INSERT INTO deposit_methods (name, details, is_active) VALUES (?, ?, 1)", (name, details))
+        conn.commit()
+        mid = cur.lastrowid
+        conn.close()
+        send_message_with_keyboard(chat_id, f"✅ تم إضافة طريقة إيداع\nID: {mid}\nالاسم: {name}", get_main_keyboard())
+    except Exception as e:
+        send_message_with_keyboard(chat_id, f"❌ خطأ: {e}", get_main_keyboard())
+
+
+# ============================================================
+# TELEGRAM POLLING
+# ============================================================
 
 def telegram_polling_loop():
-    global last_update_id
     print("[Telegram Polling] Started")
-    load_user_balances()
     offset = 0
     while True:
         try:
@@ -2218,52 +2178,76 @@ def telegram_polling_loop():
                         user = msg["from"]
                         text = msg.get("text", "").strip()
                         user_id = user.get("id")
-                        add_user_if_new(user)
+                        name = (user.get("first_name", "") + " " + user.get("last_name", "")).strip() or str(user_id)
+                        get_or_create_user(user_id, name)
+
+                        uid_str = str(user_id)
+                        with user_states_lock:
+                            state = user_states.get(uid_str, {})
+
+                        if state.get("action") == "deposit_amount" and text not in ["🔙 رجوع"]:
+                            handle_deposit_amount(chat_id, user_id, text)
+                            continue
+                        if state.get("action") == "deposit_proof" and text not in ["🔙 رجوع"]:
+                            handle_deposit_proof(chat_id, user_id, text)
+                            continue
+                        if state.get("action") == "withdraw_amount" and text not in ["🔙 رجوع"]:
+                            handle_withdraw_amount(chat_id, user_id, text)
+                            continue
+                        if state.get("action") == "withdraw_address" and text not in ["🔙 رجوع"]:
+                            handle_withdraw_address(chat_id, user_id, text)
+                            continue
+
+                        if text == "🔙 رجوع":
+                            with user_states_lock:
+                                user_states.pop(uid_str, None)
+                            send_message_with_keyboard(chat_id, "تم الرجوع للقائمة الرئيسية", get_main_keyboard())
+                            continue
+
                         if text == "💰 رصيدي":
                             handle_balance_command(chat_id, user_id)
+                        elif text == "📈 تداول":
+                            handle_trade_menu(chat_id, user_id)
+                        elif text == "🟢 شراء BUY":
+                            handle_open_trade(chat_id, user_id, "BUY")
+                        elif text == "🔴 بيع SELL":
+                            handle_open_trade(chat_id, user_id, "SELL")
+                        elif text == "📥 إيداع":
+                            handle_deposit_start(chat_id, user_id)
+                        elif text.startswith("إيداع_"):
+                            parts = text.split("_", 2)
+                            if len(parts) >= 3:
+                                handle_deposit_method_selected(chat_id, user_id, parts[1], parts[2])
+                        elif text == "📤 سحب":
+                            handle_withdraw_start(chat_id, user_id)
+                        elif text == "📊 صفقاتي المفتوحة":
+                            handle_my_open_trades(chat_id, user_id)
+                        elif text == "📜 سجل صفقاتي":
+                            handle_my_trade_history(chat_id, user_id)
                         elif text == "📊 سعر XAUUSD":
                             handle_price_command(chat_id)
-                        elif text in ["📊 صفقاتي المفتوحة", "/trades", "/صفقاتي"]:
-                            handle_trades_command(chat_id)
-                        elif text in ["📜 السجل", "/history", "/سجل"]:
-                            handle_history_command(chat_id)
-                        elif text in ["📦 تحميل القاعدة", "/download_db", "/قاعدة"]:
-                            handle_download_db_command(chat_id)
-                        elif text in ["📊 تصدير CSV", "/export_csv", "/تصدير"]:
-                            handle_export_csv_command(chat_id)
                         elif text == "📰 أخبار السوق":
                             handle_news_command(chat_id)
-                        elif text == "/id" or text == "/myid" or text == "🆔 ايدي" or text == "/ايدي":
-                            send_message_with_keyboard(chat_id, f"🆔 <b>ايدي حسابك:</b>\n<code>{user_id}</code>\n\nانسخه وارسله للأدمن", get_main_keyboard())
-                        elif text == "/users" or text == "/المستخدمين":
-                            if user_id in ADMIN_IDS or str(chat_id) in [str(x) for x in ADMIN_IDS]:
-                                if not user_balances:
-                                    send_message_with_keyboard(chat_id, "❌ لا يوجد مستخدمين بعد", get_main_keyboard())
-                                else:
-                                    msg = "👥 <b>قائمة المستخدمين:</b>\n\n"
-                                    for uid, data in list(user_balances.items())[-20:]:
-                                        msg += f"👤 {data.get('name','-')} - ID: <code>{uid}</code> - رصيد: {data.get('balance',0):.2f}$\n"
-                                    msg += f"\nالاجمالي: {len(user_balances)} مستخدم"
-                                    send_message_with_keyboard(chat_id, msg, get_main_keyboard())
-                            else:
-                                send_message_with_keyboard(chat_id, "❌ هذا الأمر للأدمن فقط", get_main_keyboard())
-                        elif text.startswith("/setbalance") or text.startswith("/رصيد"):
-                            if user_id in ADMIN_IDS or str(chat_id) in [str(x) for x in ADMIN_IDS]:
-                                handle_admin_set_balance(user_id, text, chat_id)
-                            else:
-                                send_message_with_keyboard(chat_id, "❌ هذا الأمر للأدمن فقط", get_main_keyboard())
+                        elif text in ["🆔 ايدي", "/id", "/myid", "/ايدي"]:
+                            send_message_with_keyboard(chat_id, f"🆔 <b>ايدي حسابك:</b>\n<code>{user_id}</code>", get_main_keyboard())
+                        elif text.startswith("/approve_dep") and user_id in ADMIN_IDS:
+                            handle_admin_approve_deposit(user_id, text, chat_id)
+                        elif text.startswith("/reject_dep") and user_id in ADMIN_IDS:
+                            handle_admin_reject_deposit(user_id, text, chat_id)
+                        elif text.startswith("/approve_wd") and user_id in ADMIN_IDS:
+                            handle_admin_approve_withdraw(user_id, text, chat_id)
+                        elif text.startswith("/reject_wd") and user_id in ADMIN_IDS:
+                            handle_admin_reject_withdraw(user_id, text, chat_id)
+                        elif text.startswith("/addmethod") and user_id in ADMIN_IDS:
+                            handle_admin_add_method(user_id, text, chat_id)
+                        elif text.startswith("/setbalance") and user_id in ADMIN_IDS:
+                            handle_admin_set_balance(user_id, text, chat_id)
                         elif text == "/start" or text == "/help":
                             welcome = (
                                 f"👋 أهلا {user.get('first_name','')}!\n\n"
                                 f"🤖 بوت كلاريث VIP GOLD\n"
                                 f"🆔 ايديك: <code>{user_id}</code>\n\n"
-                                f"استخدم الأزرار بالأسفل:\n"
-                                f"💰 رصيدي - عرض رصيدك\n"
-                                f"📊 سعر XAUUSD - السعر الحالي\n"
-                                f"📰 أخبار السوق - اخبار USD\n\n"
-                                f"/id - عرض ايديك\n"
-                                f"/users - عرض المستخدمين\n"
-                                f"/setbalance USER_ID AMOUNT - تعديل الرصيد"
+                                f"استخدم الأزرار بالأسفل للتداول والإيداع والسحب."
                             )
                             send_message_with_keyboard(chat_id, welcome, get_main_keyboard())
             time.sleep(1)
@@ -2272,19 +2256,151 @@ def telegram_polling_loop():
             time.sleep(3)
 
 
-def start_application():
-    print("KALARITH VIP GOLD - FULL FIXED 1410+ NO COMPRESSION")
-    if not acquire_bot_lock():
+# ============================================================
+# REPORTS + LOOP
+# ============================================================
+
+def send_market_status(saudi_now):
+    global last_market_report_hour
+    current_hour_key = saudi_now.strftime("%Y-%m-%d_%H")
+    if last_market_report_hour == current_hour_key:
         return
+    update_all_timeframes()
+    time.sleep(0.3)
+    price = get_biquote_price()
+    price_text = f"{price:.3f}" if price is not None else "غير متوفر"
+    context = analyze_market_context()
+    msg = (
+        f"📊 <b>تقرير حالة السوق</b>\n"
+        f"📅 <code>{saudi_now.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+        f"💰 السعر: <code>{price_text}</code>\n"
+        f"🧠 H1: <code>{context['h1_bias']}</code> | M15: <code>{context['m15_bias']}</code> | M5: <code>{context['m5_bias']}</code>\n"
+        f"📈 إشارات: <code>{daily_signals}</code> | مكتملة: <code>{daily_completed_trades}</code>\n"
+        f"✅ رابحة: <code>{daily_wins}</code> | ❌ خاسرة: <code>{daily_losses}</code> | 🛡️ تعادل: <code>{daily_be_hits}</code>"
+    )
+    event_id = f"STATUS_{current_hour_key}"
+    if send_to_telegram(msg, event_id=event_id):
+        last_market_report_hour = current_hour_key
+
+def send_daily_summary():
+    global daily_signals, daily_completed_trades, daily_wins, daily_losses
+    global daily_tp1_hits, daily_tp2_hits, daily_sl_hits, daily_be_hits, daily_timeout
+    global daily_a_grade, daily_b_grade, daily_reversals, daily_total_profit
+    global last_summary_date, consecutive_losses, daily_loss_total
+    total = daily_wins + daily_losses
+    wr = (daily_wins / total * 100) if total > 0 else 0
+    msg = (
+        f"📊 <b>ملخص يومي</b>\n"
+        f"📅 {last_summary_date}\n\n"
+        f"إشارات: {daily_signals}\n"
+        f"✅ {daily_wins} | ❌ {daily_losses} | 🛡️ {daily_be_hits}\n"
+        f"نسبة النجاح: {wr:.1f}%\n"
+        f"النقاط: {daily_total_profit:.2f}\n"
+        f"Timeout: {daily_timeout}"
+    )
+    send_to_telegram(msg, event_id=f"DAILY_{last_summary_date}")
+    daily_signals = daily_completed_trades = daily_wins = daily_losses = 0
+    daily_tp1_hits = daily_tp2_hits = daily_sl_hits = daily_be_hits = daily_timeout = 0
+    daily_a_grade = daily_b_grade = daily_reversals = 0
+    daily_total_profit = 0.0
+    consecutive_losses = 0
+    daily_loss_total = 0.0
+    last_summary_date = datetime.now(SAUDI_TZ).date()
+
+def send_startup_report():
+    price = get_biquote_price()
+    price_text = f"{price:.3f}" if price is not None else "غير متوفر"
+    msg = (
+        f"🚀 <b>VIP GOLD - FULL + USER TRADING</b>\n\n"
+        f"تم التشغيل بنجاح\n"
+        f"📅 {datetime.now(SAUDI_TZ).strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"• إشارات ذكية + تداول وهمي للمستخدمين\n"
+        f"• إيداع وسحب حقيقي عبر الأدمن\n"
+        f"• حجم افتراضي 0.01 لوت\n\n"
+        f"💰 السعر: {price_text}"
+    )
+    send_to_telegram(msg, event_id=f"STARTUP_{datetime.now(SAUDI_TZ).strftime('%Y%m%d%H')}")
+
+class AdvancedServerHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            uptime = int((datetime.now(SAUDI_TZ) - server_started_at).total_seconds())
+            price = get_biquote_price()
+            price_text = f"{price:.3f}" if price is not None else "N/A"
+            with trades_memory_lock:
+                open_count = len(active_trades_memory)
+            html = f"""<html><body style="font-family:Arial;background:#111;color:#eee;padding:30px;">
+            <h1>KALARITH VIP GOLD + USER TRADING</h1>
+            <p>Status: ACTIVE | Uptime: {uptime}s | Signal Open: {open_count}</p>
+            <p>Active Signal: {active_trade or 'NONE'} | Entry: {entry_price}</p>
+            <p>💰 {price_text}</p>
+            </body></html>"""
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html.encode())
+        except:
+            self.send_response(500)
+    def log_message(self, *args): return
+
+def run_enterprise_server():
+    try:
+        port = int(os.environ.get("PORT", "10000"))
+        HTTPServer(("0.0.0.0", port), AdvancedServerHandler).serve_forever()
+    except Exception as e:
+        print(f"[HTTP] {e}")
+
+def trading_bot_loop():
+    global last_bot_loop, last_error, pre_market_sent
+    time.sleep(2)
     load_sent_events()
     load_ai_memory()
     load_active_trade()
-    load_user_balances()
+    send_startup_report()
+    while True:
+        try:
+            last_bot_loop = datetime.now(SAUDI_TZ)
+            now = datetime.now(SAUDI_TZ)
+            update_bot_lock()
+            if now.date() != last_summary_date:
+                send_daily_summary()
+            check_market_state(now)
+            now_ny = now.astimezone(NY_TZ)
+            if now_ny.weekday() == 6 and now_ny.hour == 17 and 25 <= now_ny.minute < 55 and not pre_market_sent:
+                send_pre_market_report(now)
+                pre_market_sent = True
+            if now.minute <= 3:
+                send_market_status(now)
+            if now.minute % 5 == 0 and now.second < 3:
+                send_news_report(get_usd_high_impact_news(), now)
+            update_all_timeframes()
+            analyze_market()
+            try:
+                live_price = get_biquote_price()
+                if live_price:
+                    check_open_trades_price_loop(live_price)
+                    check_user_trades_price_loop(live_price)
+            except Exception as e:
+                print(f"[Price Loop] Error: {e}")
+            time.sleep(1)
+        except Exception as e:
+            last_error = str(e)
+            print(f"[ERROR] {e}")
+            time.sleep(2)
+
+def start_application():
+    print("KALARITH VIP GOLD - FULL + USER TRADING SYSTEM")
+    if not acquire_bot_lock():
+        return
+    init_trades_db()
+    init_user_trading_db()
+    load_sent_events()
+    load_ai_memory()
+    load_active_trade()
+    load_open_trades_to_memory()
     threading.Thread(target=run_enterprise_server, daemon=True).start()
     threading.Thread(target=telegram_polling_loop, daemon=True).start()
-    load_user_balances()
     trading_bot_loop()
-
 
 if __name__ == "__main__":
     start_application()
