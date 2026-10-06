@@ -1079,7 +1079,7 @@ def calculate_trade_score(rsi, ema_diff, candle, context, sr_info, fvg_info, sig
     return max(0, min(score, 100))
 
 def classify_trade_with_score(score):
-    if score >= 86: return "A+", "🏆", "SEND"
+    if score >= 80: return "A+", "🏆", "SEND"
     if score >= 65: return "A", "✅", "SEND"
     return "B", "⚠️", "SKIP"
 
@@ -1578,7 +1578,7 @@ def handle_deposit_proof(chat_id, user_id, proof_text):
     conn.commit()
     conn.close()
     user = get_or_create_user(user_id)
-    send_message_with_keyboard(chat_id, f"✅ تم إرسال طلب الإيداع\n🆔 <code>#{dep_id}</code>\n⏳ بانتظار الأدمن", get_main_keyboard())
+    send_message_with_keyboard(chat_id, f"✅ تم إرسال طلب الإيداع\n🆔 <code>#{dep_id}</code>\n⚠️ بانتظار المسؤل", get_main_keyboard())
     admin_msg = (
         f"📥 <b>طلب إيداع جديد</b>\n\n🆔 <code>#{dep_id}</code>\n"
         f"👤 {user['name']} (<code>{user_id}</code>)\n💰 <code>{amount}$</code>\n"
